@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>JARVIS</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="corner top-left"></div>
+  <div class="corner top-right"></div>
+  <div class="corner bottom-left"></div>
+  <div class="corner bottom-right"></div>
+
+  <header>
+    <div class="title-block">
+      <h1>J.A.R.V.I.S.</h1>
+      <span class="subtitle">STANDBY INTERFACE V1</span>
+    </div>
+    <div id="clock" class="clock"></div>
+  </header>
+
+  <main>
+    <div class="agent-card" id="agent01">
+      <div class="agent-label">AGENT 01</div>
+      <div class="agent-name" id="agent01-name">AI 뉴스 수집/요약</div>
+      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent01-status">대기</span></div>
+      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent01-process">대기중</span></div>
+    </div>
+
+    <div class="agent-card" id="agent02">
+      <div class="agent-label">AGENT 02</div>
+      <div class="agent-name" id="agent02-name">브리핑 에이전트</div>
+      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent02-status">대기</span></div>
+      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent02-process">대기중</span></div>
+    </div>
+
+    <div class="center-panel">
+      <div class="radar-wrap">
+        <div class="radar-ring r1"></div>
+        <div class="radar-ring r2"></div>
+        <div class="radar-ring r3"></div>
+        <div class="radar-core"></div>
+        <div class="radar-sweep"></div>
+      </div>
+      <div id="status-text" class="status-text">STANDBY</div>
+      <div id="status-sub" class="status-sub">Awaiting your command, boss.</div>
+    </div>
+
+    <div class="agent-card" id="agent03">
+      <div class="agent-label">AGENT 03</div>
+      <div class="agent-name" id="agent03-name">스케줄 관리</div>
+      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent03-status">대기</span></div>
+      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent03-process">대기중</span></div>
+    </div>
+
+    <div class="agent-card" id="agent04">
+      <div class="agent-label">AGENT 04</div>
+      <div class="agent-name" id="agent04-name">자유 대화</div>
+      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent04-status">활성</span></div>
+      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent04-process">대기중</span></div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="chat-log" id="chat-log"></div>
+    <div class="input-row">
+      <span class="input-label">INPUT</span>
+      <span class="input-value" id="input-text">—</span>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
