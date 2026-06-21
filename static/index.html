@@ -4,71 +4,124 @@
   <meta charset="UTF-8">
   <title>JARVIS</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.162.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.162.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
-  <div class="corner top-left"></div>
-  <div class="corner top-right"></div>
-  <div class="corner bottom-left"></div>
-  <div class="corner bottom-right"></div>
+<div id="app">
 
+  <!-- 헤더 -->
   <header>
-    <div class="title-block">
-      <h1>J.A.R.V.I.S.</h1>
-      <span class="subtitle">STANDBY INTERFACE V1</span>
+    <div class="brand-group">
+      <h1 class="brand">J.A.R.V.I.S.</h1>
+      <span class="online-badge">● ONLINE</span>
     </div>
-    <div id="clock" class="clock"></div>
+    <div class="header-clock">
+      <span id="clock">00:00:00</span>
+      <span class="divider">|</span>
+      <span id="date">—</span>
+    </div>
+    <div class="header-right">
+      <span class="temp-badge">🌡 —°C Seoul</span>
+    </div>
   </header>
 
-  <main>
-    <div class="agent-card" id="agent01">
-      <div class="agent-label">AGENT 01</div>
-      <div class="agent-name" id="agent01-name">AI 뉴스 수집/요약</div>
-      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent01-status">대기</span></div>
-      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent01-process">대기중</span></div>
-    </div>
+  <!-- 본문 -->
+  <div class="workspace">
 
-    <div class="agent-card" id="agent02">
-      <div class="agent-label">AGENT 02</div>
-      <div class="agent-name" id="agent02-name">브리핑 에이전트</div>
-      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent02-status">대기</span></div>
-      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent02-process">대기중</span></div>
-    </div>
+    <!-- 좌측 카드 패널 -->
+    <aside class="left-panel">
 
-    <div class="center-panel">
-      <div class="radar-wrap">
-        <div class="radar-ring r1"></div>
-        <div class="radar-ring r2"></div>
-        <div class="radar-ring r3"></div>
-        <div class="radar-core"></div>
-        <div class="radar-sweep"></div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-icon">⚡</span>
+          <span class="card-title">System Stats</span>
+          <button class="icon-btn" title="refresh">↻</button>
+        </div>
+        <div class="bar-row"><span>CPU Usage</span><span id="cpu-val">—%</span></div>
+        <div class="progress-bar"><div class="progress-fill" id="cpu-bar" style="width:0%"></div></div>
+        <div class="bar-row"><span>RAM Usage</span><span id="ram-val">— GB</span></div>
+        <div class="progress-bar"><div class="progress-fill" id="ram-bar" style="width:0%"></div></div>
+        <div class="stat-grid">
+          <div class="stat-box"><div class="s-label">CPU</div><div class="s-value" id="cpu-pct">—%</div></div>
+          <div class="stat-box"><div class="s-label">Memory</div><div class="s-value" id="mem-pct">—%</div></div>
+          <div class="stat-box"><div class="s-label">Disk</div><div class="s-value" id="disk-val">—</div></div>
+        </div>
       </div>
-      <div id="status-text" class="status-text">STANDBY</div>
-      <div id="status-sub" class="status-sub">Awaiting your command, boss.</div>
-    </div>
 
-    <div class="agent-card" id="agent03">
-      <div class="agent-label">AGENT 03</div>
-      <div class="agent-name" id="agent03-name">스케줄 관리</div>
-      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent03-status">대기</span></div>
-      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent03-process">대기중</span></div>
-    </div>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-icon">🌤</span>
+          <span class="card-title">Weather</span>
+          <button class="icon-btn">↻</button>
+        </div>
+        <div class="weather-main">
+          <div class="weather-temp" id="w-temp">—°C</div>
+          <div class="weather-icon">⛅</div>
+        </div>
+        <div class="weather-loc" id="w-loc">Seoul, KR</div>
+        <div class="weather-desc" id="w-desc">—</div>
+        <div class="weather-details">
+          <div><span>Humidity</span><span id="w-hum">—%</span></div>
+          <div><span>Wind</span><span id="w-wind">— m/s</span></div>
+          <div><span>Feels Like</span><span id="w-feel">—°C</span></div>
+        </div>
+      </div>
 
-    <div class="agent-card" id="agent04">
-      <div class="agent-label">AGENT 04</div>
-      <div class="agent-name" id="agent04-name">자유 대화</div>
-      <div class="agent-row"><span class="label">상태</span><span class="value" id="agent04-status">활성</span></div>
-      <div class="agent-row"><span class="label">처리</span><span class="value" id="agent04-process">대기중</span></div>
-    </div>
-  </main>
+      <div class="card">
+        <div class="card-header">
+          <span class="card-icon">⏱</span>
+          <span class="card-title">System Uptime</span>
+        </div>
+        <div class="uptime-display" id="uptime">00:00:00</div>
+        <div class="stat-grid">
+          <div class="stat-box"><div class="s-label">Session</div><div class="s-value">1</div></div>
+          <div class="stat-box"><div class="s-label">Commands</div><div class="s-value" id="cmd-count">0</div></div>
+        </div>
+        <div class="load-row">
+          <span>System Load</span>
+          <span class="load-badge" id="load-badge">Normal</span>
+        </div>
+        <div class="progress-bar"><div class="progress-fill" id="load-bar" style="width:0%"></div></div>
+      </div>
 
-  <footer>
-    <div class="chat-log" id="chat-log"></div>
-    <div class="input-row">
-      <span class="input-label">INPUT</span>
-      <span class="input-value" id="input-text">—</span>
-    </div>
-  </footer>
+    </aside>
 
-  <script src="/static/app.js"></script>
+    <!-- 가운데: 파티클 구체 -->
+    <main class="center">
+      <div id="sphere-wrap">
+        <div id="sphere-container"></div>
+        <div class="sphere-labels">
+          <div class="jarvis-label">J.A.R.V.I.S.</div>
+          <div class="status-row">
+            <span class="status-dot standby" id="status-dot"></span>
+            <span id="status-detail">Standby</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- 우측: 대화 패널 -->
+    <aside class="right-panel">
+      <div class="conv-header">
+        <span class="card-title">Conversation</span>
+        <button class="small-btn" onclick="document.getElementById('chat-log').innerHTML=''">Clear</button>
+      </div>
+      <div id="chat-log" class="chat-log"></div>
+      <div class="input-bar">
+        <input id="text-input" type="text" placeholder="Type a message..." autocomplete="off" />
+        <button id="send-btn">➤</button>
+      </div>
+    </aside>
+
+  </div>
+</div>
+<script type="module" src="/static/app.js"></script>
 </body>
 </html>
