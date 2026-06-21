@@ -46,6 +46,7 @@ ws.onclose = () => {
 function setJarvisState(state) {
   currentState = state;
   params.particleColor = STATE_COLORS[state] ?? STATE_COLORS.standby;
+  if (particleSystem) particleSystem.material.opacity = state === 'standby' ? 0.25 : 0.12;
   updateParticleSystem();
   morphToShape(STATE_SHAPES[state] ?? 'sphere');
   pulsePhase = 0;
@@ -221,7 +222,7 @@ function createParticleSystem() {
 
   for (let i = 0; i < numParticles; i++) {
     // 중앙 30% 비우고 바깥쪽에 분포
-    const r     = (0.85 + Math.random() * 0.15) * 0.45;
+    const r     = (0.85 + Math.random() * 0.15) * 0.65;
     const phi   = Math.acos(2 * Math.random() - 1);
     const theta = Math.random() * Math.PI * 2;
     const x = r * Math.sin(phi) * Math.cos(theta);
@@ -256,7 +257,7 @@ function createParticleSystem() {
     depthTest: true,
     depthWrite: false,
     transparent: true,
-    opacity: 0.9,
+    opacity: 0.25,
     sizeAttenuation: true,
   });
 
@@ -359,7 +360,7 @@ function morphToShape(shapeType) {
     case 'sphere':
       // 표면이 아닌 내부를 꽉 채우는 volumetric 분포
       for (let i = 0; i < numParticles; i++) {
-        const r     = (0.85 + Math.random() * 0.15) * 0.45;
+        const r     = (0.85 + Math.random() * 0.15) * 0.65;
         const phi   = Math.acos(2 * Math.random() - 1);
         const theta = Math.random() * Math.PI * 2;
         targetPositions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
@@ -371,7 +372,7 @@ function morphToShape(shapeType) {
     case 'cube':
       targetGeometry = new THREE.BoxGeometry(2.2, 2.2, 2.2); break;
     case 'torus':
-      targetGeometry = new THREE.TorusGeometry(0.14, 0.07, 32, 150); break;
+      targetGeometry = new THREE.TorusGeometry(0.22, 0.11, 32, 150); break;
     case 'icosahedron':
       targetGeometry = new THREE.IcosahedronGeometry(1.7, 3); break;
     default: return;
