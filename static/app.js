@@ -16,9 +16,9 @@ const STATE_COLORS = {
 
 const STATE_SHAPES = {
   standby:   'sphere',
-  listening: 'sphere',
-  thinking:  'icosahedron',
-  speaking:  'sphere',
+  listening: 'torus',
+  thinking:  'torus',
+  speaking:  'torus',
 };
 
 const stateLabels = {
@@ -48,12 +48,15 @@ function setJarvisState(state) {
   params.particleColor = STATE_COLORS[state] ?? STATE_COLORS.standby;
   updateParticleSystem();
   morphToShape(STATE_SHAPES[state] ?? 'sphere');
+  pulsePhase = 0;
+  regenerateScatter();
 
   const dot = document.getElementById('status-dot');
   if (dot) dot.className = `status-dot ${state}`;
 
   const detail = document.getElementById('status-detail');
   if (detail) detail.textContent = stateLabels[state] || state;
+
 }
 
 let cmdCount = 0;
@@ -123,23 +126,27 @@ updateUptime();
 // particle orb
 const container = document.getElementById('sphere-container');
 
-let scene, camera, renderer, controls, particleSystem;
-const numParticles = 25000;
+let scene, camera, renderer, controls, particleSystem, lineSystem;
+const numParticles = 600;
+const LINE_THRESHOLD = 0.32;
+const MAX_LINES = 8000;
 const clock = new THREE.Clock();
 let targetPositions = [];
 let animationProgress = 1;
 const animationDuration = 1.5;
 let pulsePhase = 0;
+let pulseSpeedPhase = 0;
+let scatterPositions = null;
 let composer, bloomPass;
 let trailTexture, trailScene, trailCamera, trailComposer;
 
 const params = {
   particleSize:   0.035,
   particleColor:  0x4fc3f7,
-  rotationSpeed:  0.1,
-  bloomStrength:  0.4,
-  bloomRadius:    0.2,
-  bloomThreshold: 0.85,
+  rotationSpeed:  0.04,
+  bloomStrength:  0.0,
+  bloomRadius:    0.0,
+  bloomThreshold: 1.0,
   motionTrail:    0.3,
 };
 
@@ -151,6 +158,7 @@ function init() {
   initComposers();
   initControls();
   createParticleSystem();
+  createLineSystem();
   initTrailEffect();
   morphToShape('sphere');
   window.addEventListener('resize', onWindowResize);
@@ -213,7 +221,7 @@ function createParticleSystem() {
 
   for (let i = 0; i < numParticles; i++) {
     // 중앙 30% 비우고 바깥쪽에 분포
-    const r     = (0.3 + Math.random() * 0.7) * 0.75;
+    const r     = (0.85 + Math.random() * 0.15) * 0.45;
     const phi   = Math.acos(2 * Math.random() - 1);
     const theta = Math.random() * Math.PI * 2;
     const x = r * Math.sin(phi) * Math.cos(theta);
@@ -255,8 +263,73 @@ function createParticleSystem() {
   particleSystem = new THREE.Points(geometry, material);
   scene.add(particleSystem);
 
+  scatterPositions = new Float32Array(numParticles * 3);
+
   const trailParticles = particleSystem.clone();
   trailScene.add(trailParticles);
+}
+
+function createLineSystem() {
+  const geo = new THREE.BufferGeometry();
+  const linPos = new Float32Array(MAX_LINES * 6);
+  const linCol = new Float32Array(MAX_LINES * 6);
+  geo.setAttribute('position', new THREE.BufferAttribute(linPos, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(linCol, 3));
+  geo.setDrawRange(0, 0);
+
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    blending: THREE.AdditiveBlending,
+    transparent: true,
+    depthWrite: false,
+    opacity: 0.6,
+  });
+
+  lineSystem = new THREE.LineSegments(geo, mat);
+  particleSystem.add(lineSystem);
+}
+
+function updateLines() {
+  if (!lineSystem || !particleSystem) return;
+  const pos  = particleSystem.geometry.attributes.position.array;
+  const lPos = lineSystem.geometry.attributes.position.array;
+  const lCol = lineSystem.geometry.attributes.color.array;
+  const c    = new THREE.Color(params.particleColor);
+  let count  = 0;
+
+  for (let i = 0; i < numParticles && count < MAX_LINES; i++) {
+    for (let j = i + 1; j < numParticles && count < MAX_LINES; j++) {
+      const dx = pos[i*3] - pos[j*3];
+      const dy = pos[i*3+1] - pos[j*3+1];
+      const dz = pos[i*3+2] - pos[j*3+2];
+      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (dist < LINE_THRESHOLD) {
+        const alpha = (1 - dist / LINE_THRESHOLD) * 0.5;
+        const base  = count * 6;
+        lPos[base]   = pos[i*3];   lPos[base+1] = pos[i*3+1]; lPos[base+2] = pos[i*3+2];
+        lPos[base+3] = pos[j*3];   lPos[base+4] = pos[j*3+1]; lPos[base+5] = pos[j*3+2];
+        lCol[base]   = c.r*alpha;  lCol[base+1] = c.g*alpha;  lCol[base+2] = c.b*alpha;
+        lCol[base+3] = c.r*alpha;  lCol[base+4] = c.g*alpha;  lCol[base+5] = c.b*alpha;
+        count++;
+      }
+    }
+  }
+
+  lineSystem.geometry.setDrawRange(0, count * 2);
+  lineSystem.geometry.attributes.position.needsUpdate = true;
+  lineSystem.geometry.attributes.color.needsUpdate    = true;
+}
+
+function regenerateScatter() {
+  if (!scatterPositions) return;
+  for (let i = 0; i < numParticles; i++) {
+    const dist = 0.3 + Math.random() * 0.6;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const theta = Math.random() * Math.PI * 2;
+    scatterPositions[i*3]   = targetPositions[i*3]   + dist * Math.sin(phi) * Math.cos(theta);
+    scatterPositions[i*3+1] = targetPositions[i*3+1] + dist * Math.sin(phi) * Math.sin(theta);
+    scatterPositions[i*3+2] = targetPositions[i*3+2] + dist * Math.cos(phi);
+  }
 }
 
 function initTrailEffect() {
@@ -286,7 +359,7 @@ function morphToShape(shapeType) {
     case 'sphere':
       // 표면이 아닌 내부를 꽉 채우는 volumetric 분포
       for (let i = 0; i < numParticles; i++) {
-        const r     = (0.3 + Math.random() * 0.7);
+        const r     = (0.85 + Math.random() * 0.15) * 0.45;
         const phi   = Math.acos(2 * Math.random() - 1);
         const theta = Math.random() * Math.PI * 2;
         targetPositions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
@@ -298,7 +371,7 @@ function morphToShape(shapeType) {
     case 'cube':
       targetGeometry = new THREE.BoxGeometry(2.2, 2.2, 2.2); break;
     case 'torus':
-      targetGeometry = new THREE.TorusGeometry(1.2, 0.4, 32, 200); break;
+      targetGeometry = new THREE.TorusGeometry(0.14, 0.07, 32, 150); break;
     case 'icosahedron':
       targetGeometry = new THREE.IcosahedronGeometry(1.7, 3); break;
     default: return;
@@ -356,15 +429,29 @@ function animate() {
   const delta = clock.getDelta();
 
   if (particleSystem) {
-    if (currentState === 'listening' || currentState === 'speaking') {
-      pulsePhase += delta * 5.0;
-      const pulse = 1.0 + 0.18 * Math.sin(pulsePhase);
-      particleSystem.scale.setScalar(pulse);
-      particleSystem.rotation.y += delta * 1.2;
-      particleSystem.rotation.x += delta * 0.5;
+    const isPulsing = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking';
+
+    if (isPulsing) {
+      pulseSpeedPhase += delta * 0.6;
+      pulsePhase += delta * 4.0;
+      particleSystem.rotation.y += delta * 0.4;
+      particleSystem.rotation.x += delta * 0.15;
+
+      if (animationProgress >= 1 && scatterPositions) {
+        // 0→1→0 lerp: 도넛 → 흩어짐 → 도넛
+        const amp    = 0.2 + 0.4 * Math.abs(Math.sin(pulseSpeedPhase * 0.4));
+        const minAmp = 0.22 + 0.1 * Math.abs(Math.sin(pulseSpeedPhase * 0.7));
+        const t = minAmp + (1 - Math.cos(pulsePhase)) / 2 * amp;
+        const positions = particleSystem.geometry.attributes.position.array;
+        for (let i = 0; i < numParticles; i++) {
+          positions[i*3]   = targetPositions[i*3]   + (scatterPositions[i*3]   - targetPositions[i*3])   * t;
+          positions[i*3+1] = targetPositions[i*3+1] + (scatterPositions[i*3+1] - targetPositions[i*3+1]) * t;
+          positions[i*3+2] = targetPositions[i*3+2] + (scatterPositions[i*3+2] - targetPositions[i*3+2]) * t;
+        }
+        particleSystem.geometry.attributes.position.needsUpdate = true;
+      }
     } else {
       pulsePhase = 0;
-      particleSystem.scale.setScalar(1.0);
       particleSystem.rotation.y += delta * params.rotationSpeed;
     }
 
@@ -379,6 +466,8 @@ function animate() {
       particleSystem.geometry.attributes.position.needsUpdate = true;
     }
   }
+
+  updateLines();
 
   renderer.setRenderTarget(trailTexture);
   renderer.render(scene, camera);
