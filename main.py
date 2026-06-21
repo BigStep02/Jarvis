@@ -1,24 +1,14 @@
-import os
 import json
-import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
-from dotenv import load_dotenv
-
-load_dotenv()
+from pydantic import BaseModel
+from typing import Optional
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 connected_clients: list[WebSocket] = []
-
-agents = {
-    "agent01": {"name": "AI 뉴스 수집/요약", "status": "대기", "process": "대기중"},
-    "agent02": {"name": "브리핑 에이전트", "status": "대기", "process": "대기중"},
-    "agent03": {"name": "스케줄 관리", "status": "대기", "process": "대기중"},
-    "agent04": {"name": "자유 대화", "status": "활성", "process": "대기중"},
-}
 
 @app.get("/")
 async def root():
@@ -29,33 +19,38 @@ async def root():
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_clients.append(websocket)
-    await websocket.send_json({"type": "agents", "data": agents})
     try:
         while True:
             data = await websocket.receive_text()
             msg = json.loads(data)
-            if msg.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
+            if msg.get("type") == "text_command":
+                await broadcast({"type": "chat", "role": "user", "text": msg["text"]})
     except WebSocketDisconnect:
-        connected_clients.remove(websocket)
+        if websocket in connected_clients:
+            connected_clients.remove(websocket)
+
+class Event(BaseModel):
+    type: str
+    state: Optional[str] = None
+    role: Optional[str] = None
+    text: Optional[str] = None
+
+@app.post("/event")
+async def receive_event(event: Event):
+    msg = {k: v for k, v in event.model_dump().items() if v is not None}
+    await broadcast(msg)
+    return {"ok": True}
 
 async def broadcast(message: dict):
+    dead = []
     for client in connected_clients:
         try:
             await client.send_json(message)
         except:
-            pass
-
-def update_agent(agent_id: str, status: str, process: str):
-    agents[agent_id]["status"] = status
-    agents[agent_id]["process"] = process
-    asyncio.run(broadcast({"type": "agent_update", "id": agent_id, "data": agents[agent_id]}))
-
-def send_message(role: str, text: str):
-    asyncio.run(broadcast({"type": "message", "role": role, "text": text}))
-
-def set_listening(is_listening: bool):
-    asyncio.run(broadcast({"type": "listening", "value": is_listening}))
+            dead.append(client)
+    for c in dead:
+        if c in connected_clients:
+            connected_clients.remove(c)
 
 if __name__ == "__main__":
     import uvicorn
