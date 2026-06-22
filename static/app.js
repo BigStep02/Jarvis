@@ -10,8 +10,9 @@ import { GammaCorrectionShader } from 'three/addons/shaders/GammaCorrectionShade
 const STATE_COLORS = {
   standby:   0x4fc3f7,
   listening: 0xef5350,
-  thinking:  0xff9800,
+  thinking:  0xab47bc,
   speaking:  0x4caf50,
+  working:   0xff9800,
 };
 
 const STATE_SHAPES = {
@@ -19,6 +20,7 @@ const STATE_SHAPES = {
   listening: 'torus',
   thinking:  'torus',
   speaking:  'torus',
+  working:   'torus',
 };
 
 const stateLabels = {
@@ -26,6 +28,7 @@ const stateLabels = {
   listening: 'Listening...',
   thinking:  'Thinking...',
   speaking:  'Speaking...',
+  working:   'Working...',
 };
 
 let currentState = 'standby';
@@ -430,30 +433,45 @@ function animate() {
   const delta = clock.getDelta();
 
   if (particleSystem) {
-    const isPulsing = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking';
+    const isActive  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking' || currentState === 'working';
+    const hasPulse  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking';
 
-    if (isPulsing) {
-      pulseSpeedPhase += delta * 0.6;
-      pulsePhase += delta * 4.0;
+    if (isActive) {
       particleSystem.rotation.y += delta * 0.4;
       particleSystem.rotation.x += delta * 0.15;
 
-      if (animationProgress >= 1 && scatterPositions) {
-        // 0→1→0 lerp: 도넛 → 흩어짐 → 도넛
-        const amp    = 0.2 + 0.4 * Math.abs(Math.sin(pulseSpeedPhase * 0.4));
-        const minAmp = 0.22 + 0.1 * Math.abs(Math.sin(pulseSpeedPhase * 0.7));
-        const t = minAmp + (1 - Math.cos(pulsePhase)) / 2 * amp;
+      if (hasPulse) {
+        pulseSpeedPhase += delta * 0.6;
+        pulsePhase += delta * 4.0;
+
+        if (animationProgress >= 1 && scatterPositions) {
+          const amp    = 0.2 + 0.4 * Math.abs(Math.sin(pulseSpeedPhase * 0.4));
+          const minAmp = 0.22 + 0.1 * Math.abs(Math.sin(pulseSpeedPhase * 0.7));
+          const t = minAmp + (1 - Math.cos(pulsePhase)) / 2 * amp;
+          const positions = particleSystem.geometry.attributes.position.array;
+          for (let i = 0; i < numParticles; i++) {
+            positions[i*3]   = targetPositions[i*3]   + (scatterPositions[i*3]   - targetPositions[i*3])   * t;
+            positions[i*3+1] = targetPositions[i*3+1] + (scatterPositions[i*3+1] - targetPositions[i*3+1]) * t;
+            positions[i*3+2] = targetPositions[i*3+2] + (scatterPositions[i*3+2] - targetPositions[i*3+2]) * t;
+          }
+          particleSystem.geometry.attributes.position.needsUpdate = true;
+        }
+      }
+    } else {
+      // standby: 구체가 숨쉬는 효과
+      pulsePhase += delta * 1.0;
+      particleSystem.rotation.y += delta * params.rotationSpeed;
+
+      if (animationProgress >= 1) {
+        const scale = 1.0 + 0.08 * Math.sin(pulsePhase);
         const positions = particleSystem.geometry.attributes.position.array;
         for (let i = 0; i < numParticles; i++) {
-          positions[i*3]   = targetPositions[i*3]   + (scatterPositions[i*3]   - targetPositions[i*3])   * t;
-          positions[i*3+1] = targetPositions[i*3+1] + (scatterPositions[i*3+1] - targetPositions[i*3+1]) * t;
-          positions[i*3+2] = targetPositions[i*3+2] + (scatterPositions[i*3+2] - targetPositions[i*3+2]) * t;
+          positions[i*3]   = targetPositions[i*3]   * scale;
+          positions[i*3+1] = targetPositions[i*3+1] * scale;
+          positions[i*3+2] = targetPositions[i*3+2] * scale;
         }
         particleSystem.geometry.attributes.position.needsUpdate = true;
       }
-    } else {
-      pulsePhase = 0;
-      particleSystem.rotation.y += delta * params.rotationSpeed;
     }
 
     if (animationProgress < 1) {

@@ -11,8 +11,9 @@
   --text-bright: #c2dff0;
   --standby:  #4fc3f7;
   --listening:#ef5350;
-  --thinking: #ff9800;
+  --thinking: #ab47bc;
   --speaking: #4caf50;
+  --working:  #ff9800;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -270,6 +271,7 @@ header {
 .status-dot.listening { background: var(--listening); }
 .status-dot.thinking  { background: var(--thinking); }
 .status-dot.speaking  { background: var(--speaking); }
+.status-dot.working   { background: var(--working); }
 
 .action-btns { display: flex; gap: 12px; }
 .action-btn {

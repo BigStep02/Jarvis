@@ -1,4 +1,5 @@
 import json
+from collections import deque
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
@@ -9,6 +10,7 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 connected_clients: list[WebSocket] = []
+command_queue: deque = deque()
 
 @app.get("/")
 async def root():
@@ -24,6 +26,7 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             msg = json.loads(data)
             if msg.get("type") == "text_command":
+                command_queue.append(msg["text"])
                 await broadcast({"type": "chat", "role": "user", "text": msg["text"]})
     except WebSocketDisconnect:
         if websocket in connected_clients:
@@ -34,6 +37,12 @@ class Event(BaseModel):
     state: Optional[str] = None
     role: Optional[str] = None
     text: Optional[str] = None
+
+@app.get("/poll")
+async def poll_command():
+    if command_queue:
+        return {"command": command_queue.popleft()}
+    return {"command": None}
 
 @app.post("/event")
 async def receive_event(event: Event):
