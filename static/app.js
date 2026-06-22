@@ -140,7 +140,10 @@ let animationProgress = 1;
 const animationDuration = 1.5;
 let pulsePhase = 0;
 let pulseSpeedPhase = 0;
+let orbitTime = 0;
+let currentScatterT = 0;
 let scatterPositions = null;
+let particleSpeeds = null;
 let composer, bloomPass;
 let trailTexture, trailScene, trailCamera, trailComposer;
 
@@ -269,6 +272,11 @@ function createParticleSystem() {
 
   scatterPositions = new Float32Array(numParticles * 3);
 
+  particleSpeeds = new Float32Array(numParticles);
+  for (let i = 0; i < numParticles; i++) {
+    particleSpeeds[i] = 0.5 + Math.random() * 1.2; // 0.5 ~ 1.7 배속
+  }
+
   const trailParticles = particleSystem.clone();
   trailScene.add(trailParticles);
 }
@@ -295,6 +303,21 @@ function createLineSystem() {
 
 function updateLines() {
   if (!lineSystem || !particleSystem) return;
+
+  // standby: 항상 선 보임 / active: scatter 정도에 따라 나타났다 사라짐
+  let lineOpacity;
+  if (currentState === 'standby') {
+    lineOpacity = 0.6;
+  } else {
+    const minT = 0.22;
+    lineOpacity = 0.12 + Math.max(0, (currentScatterT - minT - 0.05) / 0.3) * 0.4;
+  }
+  lineSystem.material.opacity = lineOpacity;
+  if (lineOpacity === 0) {
+    lineSystem.geometry.setDrawRange(0, 0);
+    return;
+  }
+
   const pos  = particleSystem.geometry.attributes.position.array;
   const lPos = lineSystem.geometry.attributes.position.array;
   const lCol = lineSystem.geometry.attributes.color.array;
@@ -363,7 +386,7 @@ function morphToShape(shapeType) {
     case 'sphere':
       // 표면이 아닌 내부를 꽉 채우는 volumetric 분포
       for (let i = 0; i < numParticles; i++) {
-        const r     = (0.85 + Math.random() * 0.15) * 1.1;
+        const r     = (0.85 + Math.random() * 0.15) * 0.75;
         const phi   = Math.acos(2 * Math.random() - 1);
         const theta = Math.random() * Math.PI * 2;
         targetPositions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
@@ -431,14 +454,16 @@ function onWindowResize() {
 function animate() {
   requestAnimationFrame(animate);
   const delta = clock.getDelta();
+  orbitTime += delta;
 
   if (particleSystem) {
     const isActive  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking' || currentState === 'working';
     const hasPulse  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking';
 
     if (isActive) {
-      particleSystem.rotation.y += delta * 0.4;
-      particleSystem.rotation.x += delta * 0.15;
+      particleSystem.rotation.x = 0;
+      particleSystem.rotation.y = 0;
+      particleSystem.rotation.z -= delta * 0.5;
 
       if (hasPulse) {
         pulseSpeedPhase += delta * 0.6;
@@ -447,31 +472,33 @@ function animate() {
         if (animationProgress >= 1 && scatterPositions) {
           const amp    = 0.2 + 0.4 * Math.abs(Math.sin(pulseSpeedPhase * 0.4));
           const minAmp = 0.22 + 0.1 * Math.abs(Math.sin(pulseSpeedPhase * 0.7));
-          const t = minAmp + (1 - Math.cos(pulsePhase)) / 2 * amp;
           const positions = particleSystem.geometry.attributes.position.array;
           for (let i = 0; i < numParticles; i++) {
-            positions[i*3]   = targetPositions[i*3]   + (scatterPositions[i*3]   - targetPositions[i*3])   * t;
-            positions[i*3+1] = targetPositions[i*3+1] + (scatterPositions[i*3+1] - targetPositions[i*3+1]) * t;
-            positions[i*3+2] = targetPositions[i*3+2] + (scatterPositions[i*3+2] - targetPositions[i*3+2]) * t;
+            const dx = targetPositions[i*3];
+            const dy = targetPositions[i*3+1];
+            const dz = targetPositions[i*3+2];
+            const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            const lag = (0.56 - dist) * 3.5;
+            const spd = particleSpeeds ? particleSpeeds[i] : 1;
+            const pt = minAmp + (1 - Math.cos(pulsePhase * spd - lag)) / 2 * amp;
+            positions[i*3]   = targetPositions[i*3]   + (scatterPositions[i*3]   - targetPositions[i*3])   * pt;
+            positions[i*3+1] = targetPositions[i*3+1] + (scatterPositions[i*3+1] - targetPositions[i*3+1]) * pt;
+            positions[i*3+2] = targetPositions[i*3+2] + (scatterPositions[i*3+2] - targetPositions[i*3+2]) * pt;
+            if (i === 0) currentScatterT = pt;
+            // 위성 궤도: 파티클마다 다른 속도·위상·기울기로 작은 원을 그림
+            const orbitPhase = (i / numParticles) * Math.PI * 6 + orbitTime * spd;
+            const tilt = (i * 2.618) % (Math.PI * 2);
+            const r = 0.018 + spd * 0.008;
+            positions[i*3]   += Math.cos(orbitPhase) * r;
+            positions[i*3+1] += Math.sin(orbitPhase) * Math.cos(tilt) * r;
+            positions[i*3+2] += Math.sin(orbitPhase) * Math.sin(tilt) * r;
           }
           particleSystem.geometry.attributes.position.needsUpdate = true;
         }
       }
     } else {
-      // standby: 구체가 숨쉬는 효과
-      pulsePhase += delta * 1.0;
+      // standby: 맥동 없이 천천히 회전
       particleSystem.rotation.y += delta * params.rotationSpeed;
-
-      if (animationProgress >= 1) {
-        const scale = 1.0 + 0.08 * Math.sin(pulsePhase);
-        const positions = particleSystem.geometry.attributes.position.array;
-        for (let i = 0; i < numParticles; i++) {
-          positions[i*3]   = targetPositions[i*3]   * scale;
-          positions[i*3+1] = targetPositions[i*3+1] * scale;
-          positions[i*3+2] = targetPositions[i*3+2] * scale;
-        }
-        particleSystem.geometry.attributes.position.needsUpdate = true;
-      }
     }
 
     if (animationProgress < 1) {
