@@ -26,6 +26,7 @@ EXIT_WORDS = ["종료", "쉬어", "그만", "꺼져", "끝내", "닫아", "꺼"]
 SYSTEM_PROMPT = "너는 자비스라는 AI 어시스턴트야. 간결하고 자연스럽게 한국어로 대답해줘."
 
 INTENT_SYSTEM_PROMPT = """\
+/no_think
 사용자 발화의 의도를 파악해서 아래 형식 중 하나로 JSON만 출력해. 다른 텍스트는 절대 출력하지 마.
 
 앱 실행: {"type": "open_app", "name": "chrome|notepad|explorer|calculator|vscode"}
@@ -129,7 +130,29 @@ def listen():
         speak("인터넷 연결이 불안정합니다.")
         return None
 
-# 사용자 발화 의도 감지 (LLM 기반)
+# 키워드 기반 의도 감지 (fallback)
+def detect_action_keyword(text):
+    t = text.lower()
+    app_map = {
+        ("크롬", "chrome", "브라우저"):              "chrome",
+        ("메모장", "notepad", "textedit"):           "notepad",
+        ("탐색기", "explorer", "파일탐색기", "finder"): "explorer",
+        ("계산기", "calculator"):                    "calculator",
+        ("vscode", "비에스코드", "코드에디터"):        "vscode",
+    }
+    for keywords, name in app_map.items():
+        if any(k in t for k in keywords):
+            if any(w in t for w in ["열어", "켜", "실행", "시작", "열기", "open"]):
+                return {"type": "open_app", "name": name}
+    if any(w in t for w in ["검색해", "찾아줘", "찾아봐", "구글에서"]):
+        query = text
+        for w in ["검색해줘", "검색해", "찾아줘", "찾아봐", "자비스"]:
+            query = query.replace(w, "").strip()
+        if query:
+            return {"type": "search", "query": query}
+    return None
+
+# 사용자 발화 의도 감지 (LLM 기반, 실패 시 키워드 fallback)
 def detect_action(text):
     try:
         resp = requests.post(OLLAMA_URL, json={
@@ -139,19 +162,37 @@ def detect_action(text):
                 {"role": "user", "content": text},
             ],
             "stream": False,
-        }, timeout=(5, 15))
-        content = resp.json()["message"]["content"].strip()
+        }, timeout=(2, 3))
+        data = resp.json()
+        if "error" in data:
+            raise ValueError(data["error"])
+        if "message" in data:
+            content = data["message"]["content"].strip()
+        elif "response" in data:
+            content = data["response"].strip()
+        else:
+            raise ValueError(f"알 수 없는 응답 형식: {list(data.keys())}")
 
         if "</think>" in content:
             content = content[content.rfind("</think>") + 8:].strip()
+
+        # JSON 코드블록 제거
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
 
         action = json.loads(content)
         if action.get("type") == "chat":
             return None
         return action
     except Exception as e:
-        logging.warning(f"detect_action LLM 실패, 일반 대화로 처리: {e}")
-        return None
+        try:
+            logging.warning(f"detect_action LLM 실패 ({e}), 응답: {resp.json()}")
+        except Exception:
+            logging.warning(f"detect_action LLM 실패 ({e})")
+        return detect_action_keyword(text)
 
 # 작업 실행
 def execute_action(action):
