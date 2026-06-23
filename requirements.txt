@@ -1,0 +1,11 @@
+requests
+SpeechRecognition
+pyttsx3
+pyaudio
+fastapi
+uvicorn
+pydantic
+websockets
+edge-tts
+duckduckgo-search
+beautifulsoup4

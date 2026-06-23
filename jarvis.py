@@ -7,14 +7,19 @@ import logging
 import subprocess
 import webbrowser
 import urllib.parse
+import asyncio
+import tempfile
 import requests
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
 import speech_recognition as sr
 import pyttsx3
+import edge_tts
 
 # 설정
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 OLLAMA_URL      = f"{OLLAMA_BASE_URL}/api/chat"
-OLLAMA_MODEL    = "qwen3:8b"
+OLLAMA_MODEL = "qwen3:1.7b"
 SERVER_URL      = "http://127.0.0.1:8000/event"
 
 HISTORY_FILE = "conversation_history.json"
@@ -51,7 +56,7 @@ def get_app_commands():
         }
     else:
         return {
-            "chrome":     "open -a \"Google Chrome\"",
+            "chrome":     "open -na \"Google Chrome\"",
             "notepad":    "open -a TextEdit",
             "explorer":   "open .",
             "calculator": "open -a Calculator",
@@ -61,6 +66,8 @@ def get_app_commands():
 APPS = get_app_commands()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+
+VOICE = "ko-KR-InJoonNeural"
 
 # 대화 기록
 def load_history():
@@ -89,10 +96,7 @@ def send_chat(role, text):
     send_event(type="chat", role=role, text=text)
 
 # TTS
-def speak(text):
-    print(f"자비스: {text}")
-    set_state("speaking")
-    send_chat("jarvis", text)
+def _speak_pyttsx3(text):
     engine = pyttsx3.init()
     voices = engine.getProperty('voices')
     for v in voices:
@@ -104,20 +108,58 @@ def speak(text):
     engine.say(text)
     engine.runAndWait()
     engine.stop()
+
+async def _tts_async(text, path):
+    communicate = edge_tts.Communicate(text, VOICE)
+    await communicate.save(path)
+
+def _play_audio(path):
+    if platform.system() == "Darwin":
+        subprocess.run(["afplay", path], check=True)
+    elif platform.system() == "Windows":
+        subprocess.run(["powershell", "-c", f'(New-Object Media.SoundPlayer "{path}").PlaySync()'], check=True)
+    else:
+        subprocess.run(["mpg123", "-q", path], check=True)
+
+def speak(text):
+    print(f"자비스: {text}")
+    set_state("speaking")
+    send_chat("jarvis", text)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.close()
+    try:
+        asyncio.run(_tts_async(text, tmp.name))
+        _play_audio(tmp.name)
+        time.sleep(0.3)
+    except Exception as e:
+        logging.warning(f"edge-tts 실패, pyttsx3 폴백: {e}")
+        _speak_pyttsx3(text)
+    finally:
+        try:
+            os.remove(tmp.name)
+        except Exception:
+            pass
+
     set_state("standby")
 
 # STT
 def listen():
     r = sr.Recognizer()
-    with sr.Microphone() as source:
-        r.adjust_for_ambient_noise(source)
-        try:
-            logging.info("listen: start")
-            t0 = time.time()
-            audio = r.listen(source, timeout=5)
-            logging.info(f"listen: audio captured {time.time()-t0:.2f}s")
-        except sr.WaitTimeoutError:
-            return None
+    try:
+        with sr.Microphone() as source:
+            r.adjust_for_ambient_noise(source)
+            try:
+                logging.info("listen: start")
+                t0 = time.time()
+                audio = r.listen(source, timeout=5)
+                logging.info(f"listen: audio captured {time.time()-t0:.2f}s")
+            except sr.WaitTimeoutError:
+                return None
+    except Exception as e:
+        logging.warning(f"마이크 오픈 실패: {e}")
+        time.sleep(1)
+        return None
     try:
         t_rec0 = time.time()
         text = r.recognize_google(audio, language="ko-KR")
@@ -144,55 +186,42 @@ def detect_action_keyword(text):
         if any(k in t for k in keywords):
             if any(w in t for w in ["열어", "켜", "실행", "시작", "열기", "open"]):
                 return {"type": "open_app", "name": name}
-    if any(w in t for w in ["검색해", "찾아줘", "찾아봐", "구글에서"]):
+    if any(w in t for w in ["검색해", "찾아줘", "찾아봐", "구글에서", "뉴스", "알려줘", "가져와", "찾아"]):
         query = text
-        for w in ["검색해줘", "검색해", "찾아줘", "찾아봐", "자비스"]:
+        for w in ["검색해줘", "검색해", "찾아줘", "찾아봐", "가져와 줘", "가져와줘", "알려줘", "자비스"]:
             query = query.replace(w, "").strip()
         if query:
             return {"type": "search", "query": query}
     return None
 
-# 사용자 발화 의도 감지 (LLM 기반, 실패 시 키워드 fallback)
+# 사용자 발화 의도 감지 (키워드 기반)
 def detect_action(text):
+    return detect_action_keyword(text)
+
+# 웹 도구
+def search_web(query, max_results=5):
     try:
-        resp = requests.post(OLLAMA_URL, json={
-            "model": OLLAMA_MODEL,
-            "messages": [
-                {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            "stream": False,
-        }, timeout=(2, 3))
-        data = resp.json()
-        if "error" in data:
-            raise ValueError(data["error"])
-        if "message" in data:
-            content = data["message"]["content"].strip()
-        elif "response" in data:
-            content = data["response"].strip()
-        else:
-            raise ValueError(f"알 수 없는 응답 형식: {list(data.keys())}")
-
-        if "</think>" in content:
-            content = content[content.rfind("</think>") + 8:].strip()
-
-        # JSON 코드블록 제거
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
-        action = json.loads(content)
-        if action.get("type") == "chat":
-            return None
-        return action
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results, region="kr-ko"))
+        logging.info(f"search_web: {len(results)}개 결과")
+        return results
     except Exception as e:
-        try:
-            logging.warning(f"detect_action LLM 실패 ({e}), 응답: {resp.json()}")
-        except Exception:
-            logging.warning(f"detect_action LLM 실패 ({e})")
-        return detect_action_keyword(text)
+        logging.warning(f"search_web 실패: {e}")
+        return []
+
+def fetch_page(url, max_chars=3000):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.encoding = resp.apparent_encoding
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        return text[:max_chars]
+    except Exception as e:
+        logging.warning(f"fetch_page 실패: {e}")
+        return ""
 
 # 작업 실행
 def execute_action(action):
@@ -206,8 +235,11 @@ def execute_action(action):
         cmd = APPS.get(name)
         if cmd:
             set_state("working")
-            subprocess.Popen(cmd, shell=True)
-            time.sleep(1.5)
+            result = subprocess.run(cmd, shell=True)
+            if result.returncode != 0:
+                logging.warning(f"앱 실행 실패: {cmd}")
+                action["failed"] = True
+            time.sleep(1.0)
 
     elif action_type == "search":
         query = action.get("query", "")
@@ -376,6 +408,20 @@ def handle_ai_query(user_input):
 
     logging.info(f"handle_ai_query total_time: {time.time()-total_t0:.2f}s")
 
+def handle_search_query(user_input, query):
+    set_state("working")
+    results = search_web(query)
+    if not results:
+        handle_ai_query(user_input)
+        return
+
+    context = f"[웹 검색 결과: {query}]\n"
+    for r in results[:4]:
+        context += f"제목: {r.get('title', '')}\n내용: {r.get('body', '')}\n\n"
+
+    augmented = f"{user_input}\n\n{context}위 검색 결과를 참고해서 간결하게 한국어로 답변해줘."
+    handle_ai_query(augmented)
+
 # 유틸
 def is_wake_word(text):
     return any(w in text for w in WAKE_WORDS)
@@ -407,16 +453,23 @@ def handle_command(user_input, source='voice'):
 
     action = detect_action(user_input)
     if action:
-        execute_action(action)
         if action["type"] == "open_app":
-            reply = ACTION_REPLIES.get(action["name"], "앱을 열었습니다.")
-        else:
-            reply = f"{action.get('query', '')} 검색을 시작합니다."
-        conversation_history.append({"role": "user", "content": user_input})
-        conversation_history.append({"role": "assistant", "content": reply})
-        save_history(conversation_history)
-        speak(reply)
-        return
+            execute_action(action)
+            if action.get("failed"):
+                reply = f"{action['name']} 앱을 찾을 수 없어요. 설치되어 있는지 확인해주세요."
+            else:
+                reply = ACTION_REPLIES.get(action["name"], "앱을 열었습니다.")
+            conversation_history.append({"role": "user", "content": user_input})
+            conversation_history.append({"role": "assistant", "content": reply})
+            save_history(conversation_history)
+            speak(reply)
+            return
+        elif action["type"] == "search":
+            query = action.get("query", user_input)
+            thread = threading.Thread(target=handle_search_query, args=(user_input, query))
+            thread.daemon = True
+            thread.start()
+            return
 
     # For AI queries, handle in background to avoid blocking main loop
     thread = threading.Thread(target=handle_ai_query, args=(user_input,))
@@ -427,48 +480,18 @@ def handle_command(user_input, source='voice'):
 set_state("standby")
 print("자비스 대기 중...")
 
-# Warmup model in background to avoid first-request cold start
 def _warmup_model():
-    # wait for Ollama HTTP API
     if not wait_for_ollama_ready(timeout=120):
-        logging.info("warmup failed: Ollama API did not become ready")
+        logging.info("warmup: Ollama 준비 안 됨")
         return
-
-    # First, try a lightweight HTTP warmup (minimal prompt, no history)
     try:
         t0 = time.time()
-        logging.info("warmup: sending lightweight HTTP prewarm request")
-        payload = {"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "워밍업"}], "stream": False}
-        try:
-            r = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=120)
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                    if isinstance(data, dict) and ("message" in data or "content" in data):
-                        logging.info(f"warmup done (http) {time.time()-t0:.2f}s")
-                        return
-                except Exception:
-                    pass
-        except requests.exceptions.ReadTimeout:
-            logging.info("warmup http request timed out, will try CLI spawn fallback")
-        except Exception as e:
-            logging.info(f"warmup http request failed: {e}")
-
+        payload = {"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "안녕"}], "stream": False}
+        r = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=120)
+        if r.status_code == 200:
+            logging.info(f"warmup 완료 {time.time()-t0:.2f}s")
     except Exception as e:
-        logging.info(f"warmup http attempt error: {e}")
-
-    # Fallback: try spawning a detached `ollama run` process to keep the model resident.
-    # This helps with cold-starts on systems where the CLI starts the model process.
-    try:
-        devnull = subprocess.DEVNULL
-        # send a short innocuous prompt so the CLI will load the model
-        cmd = ["ollama", "run", OLLAMA_MODEL, "워밍업", "--nowordwrap"]
-        subprocess.Popen(cmd, stdout=devnull, stderr=devnull, close_fds=True)
-        logging.info("warmup: started ollama run subprocess (fallback)")
-    except FileNotFoundError:
-        logging.info("warmup fallback skipped: ollama CLI not found in PATH")
-    except Exception as e:
-        logging.info(f"warmup fallback failed: {e}")
+        logging.info(f"warmup 실패: {e}")
 
 threading.Thread(target=_warmup_model, daemon=True).start()
 
