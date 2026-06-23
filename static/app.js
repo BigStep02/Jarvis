@@ -458,7 +458,7 @@ function animate() {
 
   if (particleSystem) {
     const isActive  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking' || currentState === 'working';
-    const hasPulse  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking';
+    const hasPulse  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking' || currentState === 'working';
 
     if (isActive) {
       particleSystem.rotation.x = 0;
