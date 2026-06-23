@@ -1,6 +1,9 @@
 import os
+import platform
 import json
 import time
+import threading
+import logging
 import subprocess
 import webbrowser
 import urllib.parse
@@ -9,30 +12,63 @@ import speech_recognition as sr
 import pyttsx3
 
 # 설정
-OLLAMA_URL   = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "qwen3:8b"
-SERVER_URL   = "http://127.0.0.1:8000/event"
+OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+OLLAMA_URL      = f"{OLLAMA_BASE_URL}/api/chat"
+OLLAMA_MODEL    = "qwen3:8b"
+SERVER_URL      = "http://127.0.0.1:8000/event"
 
 HISTORY_FILE = "conversation_history.json"
-MAX_HISTORY  = 20
+MAX_HISTORY  = 6
 
 WAKE_WORDS = ["자비스", "제이비스", "재비스"]
 EXIT_WORDS = ["종료", "쉬어", "그만", "꺼져", "끝내", "닫아", "꺼"]
 
 SYSTEM_PROMPT = "너는 자비스라는 AI 어시스턴트야. 간결하고 자연스럽게 한국어로 대답해줘."
 
-APPS = {
-    "chrome":     "start chrome",
-    "크롬":        "start chrome",
-    "notepad":    "start notepad",
-    "메모장":      "start notepad",
-    "explorer":   "start explorer",
-    "탐색기":      "start explorer",
-    "파일탐색기":   "start explorer",
-    "calculator": "start calc",
-    "계산기":      "start calc",
-    "vscode":     "code .",
-}
+def get_app_commands():
+    if platform.system() == "Windows":
+        return {
+            "chrome":     "start chrome",
+            "크롬":        "start chrome",
+            "notepad":    "start notepad",
+            "메모장":      "start notepad",
+            "explorer":   "start explorer",
+            "탐색기":      "start explorer",
+            "파일탐색기":   "start explorer",
+            "calculator": "start calc",
+            "계산기":      "start calc",
+            "vscode":     "code .",
+        }
+    elif platform.system() == "Darwin":
+        return {
+            "chrome":     "open -a \"Google Chrome\"",
+            "크롬":        "open -a \"Google Chrome\"",
+            "notepad":    "open -a TextEdit",
+            "메모장":      "open -a TextEdit",
+            "explorer":   "open .",
+            "탐색기":      "open .",
+            "파일탐색기":   "open .",
+            "calculator": "open -a Calculator",
+            "계산기":      "open -a Calculator",
+            "vscode":     "code .",
+        }
+    else:
+        return {
+            "chrome":     "open -a \"Google Chrome\"",
+            "크롬":        "open -a \"Google Chrome\"",
+            "notepad":    "open -a TextEdit",
+            "메모장":      "open -a TextEdit",
+            "explorer":   "open .",
+            "탐색기":      "open .",
+            "파일탐색기":   "open .",
+            "calculator": "open -a Calculator",
+            "계산기":      "open -a Calculator",
+            "vscode":     "code .",
+        }
+
+APPS = get_app_commands()
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
 # 대화 기록
 def load_history():
@@ -84,11 +120,16 @@ def listen():
     with sr.Microphone() as source:
         r.adjust_for_ambient_noise(source)
         try:
+            logging.info("listen: start")
+            t0 = time.time()
             audio = r.listen(source, timeout=5)
+            logging.info(f"listen: audio captured {time.time()-t0:.2f}s")
         except sr.WaitTimeoutError:
             return None
     try:
+        t_rec0 = time.time()
         text = r.recognize_google(audio, language="ko-KR")
+        logging.info(f"listen: recognize {time.time()-t_rec0:.2f}s -> {text[:40]!r}")
         print(f"나: {text}")
         return text
     except sr.UnknownValueError:
@@ -160,7 +201,7 @@ def ask_ollama(user_input):
         "model": OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
-    }, timeout=60)
+    }, timeout=(5, 900))
     data = response.json()
     if "message" not in data:
         print(f"[Ollama 응답 오류] {data}")
@@ -172,12 +213,140 @@ def ask_ollama(user_input):
 
     return content
 
+def wait_for_ollama_ready(timeout=180, interval=3):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            resp = requests.get(f"{OLLAMA_BASE_URL}/api/version", timeout=5)
+            if resp.status_code == 200:
+                logging.info("Ollama API ready")
+                return True
+        except requests.RequestException:
+            pass
+        time.sleep(interval)
+    return False
+
+
 def ask_ollama_safe(user_input):
     try:
         return ask_ollama(user_input)
+    except requests.exceptions.ReadTimeout:
+        logging.warning("Ollama request timed out; waiting for readiness and retrying")
+        if wait_for_ollama_ready(timeout=120):
+            try:
+                return ask_ollama(user_input)
+            except Exception as e:
+                print(f"[Ollama 재시도 실패] {e}")
+        return "죄송해요, AI 서버에 연결할 수 없어요. Ollama가 실행 중인지 확인해주세요."
     except Exception as e:
         print(f"[Ollama 연결 실패] {e}")
         return "죄송해요, AI 서버에 연결할 수 없어요. Ollama가 실행 중인지 확인해주세요."
+
+
+def ask_ollama_stream(user_input, chunk_callback=None):
+    """Try streaming response from Ollama. If chunk_callback provided, it's called with partial text chunks."""
+    recent = conversation_history[-MAX_HISTORY:]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in recent:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_input})
+
+    try:
+        resp = requests.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL,
+            "messages": messages,
+            "stream": True,
+        }, stream=True, timeout=(5, 900))
+    except Exception as e:
+        raise
+
+    content = ""
+    # Try to read streamed lines; fallback if not streaming
+    try:
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            try:
+                # try parse JSON if Ollama streams JSON objects
+                j = json.loads(line)
+                # extract possible text fields
+                if isinstance(j, dict):
+                    if "message" in j and isinstance(j["message"], dict):
+                        part = j["message"].get("content", "")
+                    else:
+                        part = j.get("content", "") or j.get("text", "")
+                else:
+                    part = str(j)
+            except Exception:
+                part = line
+
+            if part:
+                content += part
+                if chunk_callback:
+                    chunk_callback(part)
+        return content.strip()
+    except Exception:
+        # If streaming iteration fails, try non-stream path
+        data = resp.json()
+        if "message" in data:
+            return data["message"].get("content", "").strip()
+        return ""
+
+
+def handle_ai_query(user_input):
+    total_t0 = time.time()
+    logging.info(f"handle_ai_query start: user={user_input[:40]!r}")
+    set_state("thinking")
+    send_chat("user", user_input)
+
+    partial_buffer = []
+
+    def on_chunk(part):
+        # buffer small chunks and speak them
+        partial_buffer.append(part)
+        # if buffer length exceeds threshold, speak joined buffer
+        joined = "".join(partial_buffer)
+        if len(joined) > 60:
+            try:
+                speak(joined)
+            except Exception:
+                pass
+            partial_buffer.clear()
+
+    used_streaming = False
+    try:
+        # try streaming first
+        t_model0 = time.time()
+        reply = ask_ollama_stream(user_input, chunk_callback=on_chunk)
+        logging.info(f"model_time (stream): {time.time()-t_model0:.2f}s")
+        used_streaming = True
+    except Exception as e:
+        logging.info(f"streaming failed: {e}")
+        t_model0 = time.time()
+        reply = ask_ollama_safe(user_input)
+        logging.info(f"model_time (sync): {time.time()-t_model0:.2f}s")
+
+    # speak any remaining buffered text from streaming
+    if partial_buffer:
+        try:
+            speak("".join(partial_buffer))
+        except Exception:
+            pass
+
+    conversation_history.append({"role": "user", "content": user_input})
+    conversation_history.append({"role": "assistant", "content": reply})
+    save_history(conversation_history)
+
+    # sync 경로일 때만 전체 reply를 TTS로 읽음 (streaming은 on_chunk에서 이미 처리)
+    if not used_streaming and reply:
+        try:
+            t_speak0 = time.time()
+            speak(reply)
+            logging.info(f"tts_time: {time.time()-t_speak0:.2f}s")
+        except Exception:
+            pass
+
+    logging.info(f"handle_ai_query total_time: {time.time()-total_t0:.2f}s")
 
 # 유틸
 def is_wake_word(text):
@@ -201,9 +370,12 @@ ACTION_REPLIES = {
     "vscode":     "VS Code를 열었습니다.",
 }
 
-def handle_command(user_input):
-    print(f"[UI 명령] {user_input}")
-    send_chat("user", user_input)
+def handle_command(user_input, source='voice'):
+    print(f"[UI 명령] {user_input} (source={source})")
+    # If the command came from the web UI (via websocket), main.py already
+    # broadcasted the user message. Avoid sending it again to prevent duplicates.
+    if source != 'ui':
+        send_chat("user", user_input)
 
     action = detect_action(user_input)
     if action:
@@ -218,18 +390,59 @@ def handle_command(user_input):
         speak(reply)
         return
 
-    set_state("thinking")
-    reply = ask_ollama_safe(user_input)
-
-    conversation_history.append({"role": "user", "content": user_input})
-    conversation_history.append({"role": "assistant", "content": reply})
-    save_history(conversation_history)
-
-    speak(reply)
+    # For AI queries, handle in background to avoid blocking main loop
+    thread = threading.Thread(target=handle_ai_query, args=(user_input,))
+    thread.daemon = True
+    thread.start()
 
 # main
 set_state("standby")
 print("자비스 대기 중...")
+
+# Warmup model in background to avoid first-request cold start
+def _warmup_model():
+    # wait for Ollama HTTP API
+    if not wait_for_ollama_ready(timeout=120):
+        logging.info("warmup failed: Ollama API did not become ready")
+        return
+
+    # First, try a lightweight HTTP warmup (minimal prompt, no history)
+    try:
+        t0 = time.time()
+        logging.info("warmup: sending lightweight HTTP prewarm request")
+        payload = {"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "워밍업"}], "stream": False}
+        try:
+            r = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=120)
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    if isinstance(data, dict) and ("message" in data or "content" in data):
+                        logging.info(f"warmup done (http) {time.time()-t0:.2f}s")
+                        return
+                except Exception:
+                    pass
+        except requests.exceptions.ReadTimeout:
+            logging.info("warmup http request timed out, will try CLI spawn fallback")
+        except Exception as e:
+            logging.info(f"warmup http request failed: {e}")
+
+    except Exception as e:
+        logging.info(f"warmup http attempt error: {e}")
+
+    # Fallback: try spawning a detached `ollama run` process to keep the model resident.
+    # This helps with cold-starts on systems where the CLI starts the model process.
+    try:
+        devnull = subprocess.DEVNULL
+        # send a short innocuous prompt so the CLI will load the model
+        cmd = ["ollama", "run", OLLAMA_MODEL, "워밍업", "--nowordwrap"]
+        subprocess.Popen(cmd, stdout=devnull, stderr=devnull, close_fds=True)
+        logging.info("warmup: started ollama run subprocess (fallback)")
+    except FileNotFoundError:
+        logging.info("warmup fallback skipped: ollama CLI not found in PATH")
+    except Exception as e:
+        logging.info(f"warmup fallback failed: {e}")
+
+threading.Thread(target=_warmup_model, daemon=True).start()
 
 while True:
     set_state("standby")
@@ -237,7 +450,7 @@ while True:
     # UI 텍스트 입력 확인
     text_cmd = poll_text_command()
     if text_cmd:
-        handle_command(text_cmd)
+        handle_command(text_cmd, source='ui')
         continue
 
     set_state("listening")
