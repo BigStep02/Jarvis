@@ -25,44 +25,35 @@ EXIT_WORDS = ["종료", "쉬어", "그만", "꺼져", "끝내", "닫아", "꺼"]
 
 SYSTEM_PROMPT = "너는 자비스라는 AI 어시스턴트야. 간결하고 자연스럽게 한국어로 대답해줘."
 
+INTENT_SYSTEM_PROMPT = """\
+사용자 발화의 의도를 파악해서 아래 형식 중 하나로 JSON만 출력해. 다른 텍스트는 절대 출력하지 마.
+
+앱 실행: {"type": "open_app", "name": "chrome|notepad|explorer|calculator|vscode"}
+웹 검색: {"type": "search", "query": "검색어"}
+일반 대화: {"type": "chat"}
+
+앱 이름 규칙:
+- 크롬, 브라우저, 구글크롬 → chrome
+- 메모장, 텍스트편집기, textedit → notepad
+- 탐색기, 파일탐색기, finder → explorer
+- 계산기 → calculator
+- vscode, 코드에디터, 비주얼스튜디오 → vscode"""
+
 def get_app_commands():
     if platform.system() == "Windows":
         return {
             "chrome":     "start chrome",
-            "크롬":        "start chrome",
             "notepad":    "start notepad",
-            "메모장":      "start notepad",
             "explorer":   "start explorer",
-            "탐색기":      "start explorer",
-            "파일탐색기":   "start explorer",
             "calculator": "start calc",
-            "계산기":      "start calc",
-            "vscode":     "code .",
-        }
-    elif platform.system() == "Darwin":
-        return {
-            "chrome":     "open -a \"Google Chrome\"",
-            "크롬":        "open -a \"Google Chrome\"",
-            "notepad":    "open -a TextEdit",
-            "메모장":      "open -a TextEdit",
-            "explorer":   "open .",
-            "탐색기":      "open .",
-            "파일탐색기":   "open .",
-            "calculator": "open -a Calculator",
-            "계산기":      "open -a Calculator",
             "vscode":     "code .",
         }
     else:
         return {
             "chrome":     "open -a \"Google Chrome\"",
-            "크롬":        "open -a \"Google Chrome\"",
             "notepad":    "open -a TextEdit",
-            "메모장":      "open -a TextEdit",
             "explorer":   "open .",
-            "탐색기":      "open .",
-            "파일탐색기":   "open .",
             "calculator": "open -a Calculator",
-            "계산기":      "open -a Calculator",
             "vscode":     "code .",
         }
 
@@ -138,33 +129,29 @@ def listen():
         speak("인터넷 연결이 불안정합니다.")
         return None
 
-# 사용자 발화에서 직접 의도 감지
+# 사용자 발화 의도 감지 (LLM 기반)
 def detect_action(text):
-    t = text.lower()
+    try:
+        resp = requests.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            "stream": False,
+        }, timeout=(5, 15))
+        content = resp.json()["message"]["content"].strip()
 
-    # 앱 실행
-    app_map = {
-        ("크롬", "chrome"):                   "chrome",
-        ("메모장", "notepad"):                 "notepad",
-        ("탐색기", "explorer", "파일 탐색기"): "explorer",
-        ("계산기", "calculator"):              "calculator",
-        ("vscode", "비에스코드", "코드 에디터"): "vscode",
-    }
-    for keywords, name in app_map.items():
-        if any(k in t for k in keywords):
-            if any(w in t for w in ["열어", "켜", "실행", "시작", "열기"]):
-                return {"type": "open_app", "name": name}
+        if "</think>" in content:
+            content = content[content.rfind("</think>") + 8:].strip()
 
-    # 웹 검색
-    search_triggers = ["검색해", "찾아", "구글에서", "검색 해"]
-    if any(w in t for w in search_triggers):
-        query = text
-        for w in ["검색해줘", "검색해", "찾아줘", "찾아봐", "구글에서 검색해줘", "자비스"]:
-            query = query.replace(w, "").strip()
-        if query:
-            return {"type": "search", "query": query}
-
-    return None
+        action = json.loads(content)
+        if action.get("type") == "chat":
+            return None
+        return action
+    except Exception as e:
+        logging.warning(f"detect_action LLM 실패, 일반 대화로 처리: {e}")
+        return None
 
 # 작업 실행
 def execute_action(action):
