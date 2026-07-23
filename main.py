@@ -37,6 +37,10 @@ class Event(BaseModel):
     state: Optional[str] = None
     role: Optional[str] = None
     text: Optional[str] = None
+    value: Optional[float] = None
+    low: Optional[float] = None
+    mid: Optional[float] = None
+    high: Optional[float] = None
 
 @app.get("/poll")
 async def poll_command():

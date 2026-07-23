@@ -222,12 +222,6 @@ header {
   min-height: 0;
 }
 
-#sphere-container {
-  position: absolute;
-  inset: 0;
-}
-#sphere-container canvas { display: block; }
-
 .sphere-labels {
   position: absolute;
   bottom: 8px;

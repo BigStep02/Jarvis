@@ -1,26 +1,10 @@
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { GammaCorrectionShader } from 'three/addons/shaders/GammaCorrectionShader.js';
-
 // ─── Jarvis 상태 정의 ───
 const STATE_COLORS = {
-  standby:   0x4fc3f7,
-  listening: 0xef5350,
-  thinking:  0xab47bc,
-  speaking:  0x4caf50,
-  working:   0xff9800,
-};
-
-const STATE_SHAPES = {
-  standby:   'sphere',
-  listening: 'torus',
-  thinking:  'torus',
-  speaking:  'torus',
-  working:   'torus',
+  standby:   { r: 0,   g: 212, b: 255 },
+  listening: { r: 255, g: 80,  b: 80  },
+  thinking:  { r: 180, g: 130, b: 255 },
+  working:   { r: 255, g: 170, b: 30  },
+  speaking:  { r: 0,   g: 230, b: 118 },
 };
 
 const stateLabels = {
@@ -33,6 +17,10 @@ const stateLabels = {
 
 let currentState = 'standby';
 
+// ─── 오디오 레벨 (speak() 중 백엔드가 실제 파형을 분석해서 보내줌) ───
+let targetAudioLevel = 0, targetAudioLow = 0, targetAudioMid = 0, targetAudioHigh = 0;
+let currentAudioLevel = 0, currentAudioLow = 0, currentAudioMid = 0, currentAudioHigh = 0;
+
 // ─── WebSocket ───
 const ws = new WebSocket('ws://127.0.0.1:8000/ws');
 
@@ -40,27 +28,33 @@ ws.onmessage = (e) => {
   const msg = JSON.parse(e.data);
   if (msg.type === 'status') setJarvisState(msg.state);
   if (msg.type === 'chat')   addChat(msg.role, msg.text);
+  if (msg.type === 'audio_level') {
+    targetAudioLevel = msg.value ?? 0;
+    targetAudioLow   = msg.low   ?? 0;
+    targetAudioMid   = msg.mid   ?? 0;
+    targetAudioHigh  = msg.high  ?? 0;
+  }
 };
 
 ws.onclose = () => {
-  document.getElementById('status-badge').textContent = 'DISCONNECTED';
+  const el = document.getElementById('status-badge');
+  if (el) el.textContent = 'DISCONNECTED';
 };
 
 function setJarvisState(state) {
   currentState = state;
-  params.particleColor = STATE_COLORS[state] ?? STATE_COLORS.standby;
-  if (particleSystem) particleSystem.material.opacity = state === 'standby' ? 0.25 : 0.07;
-  updateParticleSystem();
-  morphToShape(STATE_SHAPES[state] ?? 'sphere');
-  pulsePhase = 0;
-  regenerateScatter();
+  if (state !== 'speaking') {
+    targetAudioLevel = 0;
+    targetAudioLow = 0;
+    targetAudioMid = 0;
+    targetAudioHigh = 0;
+  }
 
   const dot = document.getElementById('status-dot');
   if (dot) dot.className = `status-dot ${state}`;
 
   const detail = document.getElementById('status-detail');
   if (detail) detail.textContent = stateLabels[state] || state;
-
 }
 
 let cmdCount = 0;
@@ -127,401 +121,236 @@ function updateUptime() {
 setInterval(updateUptime, 1000);
 updateUptime();
 
-// particle orb
-const container = document.getElementById('sphere-container');
+// ============================================================
+//  PARTICLE CLOUD (2D Canvas)
+// ============================================================
+const pCanvas = document.getElementById('particleCanvas');
+const pCtx = pCanvas.getContext('2d');
+const PARTICLE_COUNT = 420;
+const CONNECTION_DIST = 52;
+const PCANVAS_SIZE = 760;
+const PCANVAS_CENTER = PCANVAS_SIZE / 2;
+const PCANVAS_MAXR = PCANVAS_SIZE / 2 - 20;
+const particles = [];
 
-let scene, camera, renderer, controls, particleSystem, lineSystem;
-const numParticles = 600;
-const LINE_THRESHOLD = 0.28;
-const MAX_LINES = 30000;
-const clock = new THREE.Clock();
-let targetPositions = [];
-let animationProgress = 1;
-const animationDuration = 1.5;
-let pulsePhase = 0;
-let pulseSpeedPhase = 0;
-let orbitTime = 0;
-let currentScatterT = 0;
-let scatterPositions = null;
-let particleSpeeds = null;
-let composer, bloomPass;
-let trailTexture, trailScene, trailCamera, trailComposer;
-
-const params = {
-  particleSize:   0.035,
-  particleColor:  0x4fc3f7,
-  rotationSpeed:  0.04,
-  bloomStrength:  0.0,
-  bloomRadius:    0.0,
-  bloomThreshold: 1.0,
-  motionTrail:    0.3,
-};
-
-init();
-animate();
-
-function init() {
-  initScenes();
-  initComposers();
-  initControls();
-  createParticleSystem();
-  createLineSystem();
-  initTrailEffect();
-  morphToShape('sphere');
-  window.addEventListener('resize', onWindowResize);
+function resizeParticleCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const displaySize = 500;
+  pCanvas.style.width = displaySize + 'px';
+  pCanvas.style.height = displaySize + 'px';
+  pCanvas.width = PCANVAS_SIZE * dpr;
+  pCanvas.height = PCANVAS_SIZE * dpr;
+  pCtx.setTransform(1, 0, 0, 1, 0, 0);
+  pCtx.scale(dpr, dpr);
 }
+resizeParticleCanvas();
+window.addEventListener('resize', resizeParticleCanvas);
 
-function initScenes() {
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0a0e14);
-
-  camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1000);
-  camera.position.z = 5;
-
-  renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setSize(container.clientWidth, container.clientHeight);
-  renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1;
-  container.appendChild(renderer.domElement);
-
-  trailScene = new THREE.Scene();
-  trailCamera = camera.clone();
-  trailTexture = new THREE.WebGLRenderTarget(container.clientWidth, container.clientHeight, {
-    minFilter: THREE.LinearFilter,
-    magFilter: THREE.LinearFilter,
-    format: THREE.RGBAFormat,
+// 밀도 falloff로 중심에 몰리는 "구름" 형태 배치
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  const angle = Math.random() * Math.PI * 2;
+  const radius = 18 + Math.pow(Math.random(), 0.6) * 150;
+  const depth = 0.3 + Math.random() * 0.7;
+  const hot = Math.random() < 0.06;
+  particles.push({
+    x: PCANVAS_CENTER + Math.cos(angle) * radius,
+    y: PCANVAS_CENTER + Math.sin(angle) * radius,
+    baseAngle: angle,
+    baseRadius: radius,
+    depth,
+    hot,
+    size: (0.5 + Math.random() * 1.4) * depth,
+    speed: 0.2 + Math.random() * 0.5,
+    phase: Math.random() * Math.PI * 2,
+    driftSeedX: Math.random() * 1000,
+    driftSeedY: Math.random() * 1000,
+    driftSpeedX: 0.10 + Math.random() * 0.22,
+    driftSpeedY: 0.10 + Math.random() * 0.22,
+    driftAmp: 6 + Math.random() * 10,
+    burst: 0,
+    burstGain: 0.6 + Math.random() * 0.9,
   });
 }
 
-function initComposers() {
-  composer = new EffectComposer(renderer);
-  composer.addPass(new RenderPass(scene, camera));
+let animTime = 0;
 
-  bloomPass = new UnrealBloomPass(
-    new THREE.Vector2(container.clientWidth, container.clientHeight),
-    params.bloomStrength, params.bloomRadius, params.bloomThreshold
-  );
-  composer.addPass(bloomPass);
-  composer.addPass(new ShaderPass(GammaCorrectionShader));
+function animateParticles(timestamp) {
+  animTime = timestamp * 0.001;
+  currentAudioLevel += (targetAudioLevel - currentAudioLevel) * 0.30;
+  currentAudioLow   += (targetAudioLow   - currentAudioLow)   * 0.28;
+  currentAudioMid   += (targetAudioMid   - currentAudioMid)   * 0.32;
+  currentAudioHigh  += (targetAudioHigh  - currentAudioHigh)  * 0.35;
 
-  trailComposer = new EffectComposer(renderer, trailTexture);
-  trailComposer.addPass(new RenderPass(trailScene, trailCamera));
-}
+  const cx = PCANVAS_CENTER, cy = PCANVAS_CENTER;
+  const col = STATE_COLORS[currentState] || STATE_COLORS.standby;
 
-function initControls() {
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.1;
-  controls.rotateSpeed = 0.5;
-  controls.minDistance = 2;
-  controls.maxDistance = 10;
-}
+  // 잔상 트레일: 완전히 지우지 않고 이전 프레임을 서서히 페이드아웃
+  pCtx.globalCompositeOperation = 'destination-out';
+  pCtx.fillStyle = 'rgba(0,0,0,0.28)';
+  pCtx.fillRect(0, 0, PCANVAS_SIZE, PCANVAS_SIZE);
+  pCtx.globalCompositeOperation = 'source-over';
 
-function createParticleSystem() {
-  const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(numParticles * 3);
-  const colors    = new Float32Array(numParticles * 3);
-  const sizes     = new Float32Array(numParticles);
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = particles[i];
+    const t = animTime;
 
-  targetPositions = new Float32Array(numParticles * 3);
+    switch (currentState) {
+      case 'standby': {
+        // 살아있는 구름: 각 파티클이 독립적으로 자기 앵커 주변을 부유
+        const breathe = Math.sin(t * 0.55 + p.phase) * 0.06 + 1.0;
+        const ax = cx + Math.cos(p.baseAngle) * p.baseRadius * breathe;
+        const ay = cy + Math.sin(p.baseAngle) * p.baseRadius * breathe;
+        const dx = (Math.sin(t * p.driftSpeedX + p.driftSeedX)
+                  + Math.sin(t * p.driftSpeedX * 0.47 + p.driftSeedX * 1.7) * 0.5)
+                  * p.driftAmp;
+        const dy = (Math.cos(t * p.driftSpeedY + p.driftSeedY)
+                  + Math.cos(t * p.driftSpeedY * 0.53 + p.driftSeedY * 1.3) * 0.5)
+                  * p.driftAmp;
+        const tx = ax + dx;
+        const ty = ay + dy;
+        p.x += (tx - p.x) * 0.03;
+        p.y += (ty - p.y) * 0.03;
+        p.burst += (0 - p.burst) * 0.08;
+        break;
+      }
+      case 'listening': {
+        // 실시간 마이크 레벨은 아직 없어서, 리듬감 있는 시뮬레이션 펄스로 대체
+        const breathe = Math.sin(t * 0.55 + p.phase) * 0.06 + 1.0;
+        const ax = cx + Math.cos(p.baseAngle) * p.baseRadius * breathe;
+        const ay = cy + Math.sin(p.baseAngle) * p.baseRadius * breathe;
+        const wx = Math.sin(t * p.driftSpeedX + p.driftSeedX) * p.driftAmp * 0.5;
+        const wy = Math.cos(t * p.driftSpeedY + p.driftSeedY) * p.driftAmp * 0.5;
+        const pulse = (Math.sin(t * 3.4 + p.phase) * 0.5 + 0.5) * 26;
+        const targetBurst = pulse * p.burstGain;
+        p.burst += (targetBurst - p.burst) * 0.22;
+        const r = p.baseRadius * breathe + p.burst;
+        const tx = cx + Math.cos(p.baseAngle) * r + wx;
+        const ty = cy + Math.sin(p.baseAngle) * r + wy;
+        p.x += (tx - p.x) * 0.12;
+        p.y += (ty - p.y) * 0.12;
+        break;
+      }
+      case 'thinking':
+      case 'working': {
+        // 나선형 궤도 — 생각하는 느낌
+        const spiral = Math.sin(t * 1.5 + p.phase) * 0.3 + 1.0;
+        const a = p.baseAngle + t * p.speed * 0.7 + Math.sin(t * 0.5) * 0.3;
+        const r = p.baseRadius * spiral + Math.sin(t * 2.5 + p.phase) * 15;
+        p.x += (cx + Math.cos(a) * r - p.x) * 0.035;
+        p.y += (cy + Math.sin(a) * r - p.y) * 0.035;
+        break;
+      }
+      case 'speaking': {
+        // 말하기: 실제 TTS 파형(currentAudioLevel/Low/Mid/High)에 맞춰 바깥으로 튐
+        const breathe = Math.sin(t * 0.6 + p.phase) * 0.07 + 1.0;
+        const wx = Math.sin(t * p.driftSpeedX + p.driftSeedX) * p.driftAmp * 0.5;
+        const wy = Math.cos(t * p.driftSpeedY + p.driftSeedY) * p.driftAmp * 0.5;
+        const bandMix = 0.5 + 0.5 * Math.sin(p.phase * 1.9);
+        const basePulse = Math.pow(Math.sin(t * 3.2 + p.phase * 0.5), 2) * 20;
+        const audioDrive = currentAudioLevel * (130 + bandMix * 70)
+                          + currentAudioLow * 50 + currentAudioMid * 34
+                          + currentAudioHigh * bandMix * 40;
+        const targetBurst = Math.min(300, (basePulse + audioDrive) * p.burstGain);
+        p.burst += (targetBurst - p.burst) * 0.26;
+        const r = p.baseRadius * breathe + p.burst;
+        const tx = cx + Math.cos(p.baseAngle) * r + wx;
+        const ty = cy + Math.sin(p.baseAngle) * r + wy;
+        p.x += (tx - p.x) * 0.10;
+        p.y += (ty - p.y) * 0.10;
+        p.x += Math.sin(t * 6 + p.phase) * currentAudioHigh * 2;
+        p.y += Math.cos(t * 5 + p.phase) * currentAudioHigh * 2;
+        break;
+      }
+    }
 
-  for (let i = 0; i < numParticles; i++) {
-    // 중앙 30% 비우고 바깥쪽에 분포
-    const r     = (0.85 + Math.random() * 0.15) * 1.1;
-    const phi   = Math.acos(2 * Math.random() - 1);
-    const theta = Math.random() * Math.PI * 2;
-    const x = r * Math.sin(phi) * Math.cos(theta);
-    const y = r * Math.sin(phi) * Math.sin(theta);
-    const z = r * Math.cos(phi);
-
-    positions[i*3]   = x;
-    positions[i*3+1] = y;
-    positions[i*3+2] = z;
-
-    targetPositions[i*3]   = x;
-    targetPositions[i*3+1] = y;
-    targetPositions[i*3+2] = z;
-
-    const color = new THREE.Color(params.particleColor);
-    color.offsetHSL(0, 0, (Math.random() - 0.5) * 0.5);
-    colors[i*3]   = color.r;
-    colors[i*3+1] = color.g;
-    colors[i*3+2] = color.b;
-
-    sizes[i] = params.particleSize * (0.8 + Math.random() * 0.4);
+    // 원형 경계 — 벗어나면 부드럽게 안으로 당김
+    const ox = p.x - cx, oy = p.y - cy;
+    const odist = Math.sqrt(ox * ox + oy * oy);
+    if (odist > PCANVAS_MAXR) {
+      const pull = (odist - PCANVAS_MAXR) * 0.25;
+      const nx = ox / odist, ny = oy / odist;
+      p.x -= nx * pull;
+      p.y -= ny * pull;
+    }
   }
 
-  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
-  geometry.setAttribute('size',     new THREE.BufferAttribute(sizes, 1));
+  // 연결선 (별자리 효과)
+  const connDist = currentState === 'listening' ? 64 : currentState === 'speaking' ? 58 : CONNECTION_DIST;
+  const connDistSq = connDist * connDist;
+  const lineAlphaBase = currentState === 'standby' ? 0.06 : 0.08;
 
-  const material = new THREE.PointsMaterial({
-    size: params.particleSize,
-    vertexColors: true,
-    blending: THREE.AdditiveBlending,
-    depthTest: true,
-    depthWrite: false,
-    transparent: true,
-    opacity: 0.25,
-    sizeAttenuation: true,
-  });
-
-  particleSystem = new THREE.Points(geometry, material);
-  scene.add(particleSystem);
-
-  scatterPositions = new Float32Array(numParticles * 3);
-
-  particleSpeeds = new Float32Array(numParticles);
-  for (let i = 0; i < numParticles; i++) {
-    particleSpeeds[i] = 0.5 + Math.random() * 1.2; // 0.5 ~ 1.7 배속
-  }
-
-  const trailParticles = particleSystem.clone();
-  trailScene.add(trailParticles);
-}
-
-function createLineSystem() {
-  const geo = new THREE.BufferGeometry();
-  const linPos = new Float32Array(MAX_LINES * 6);
-  const linCol = new Float32Array(MAX_LINES * 6);
-  geo.setAttribute('position', new THREE.BufferAttribute(linPos, 3));
-  geo.setAttribute('color',    new THREE.BufferAttribute(linCol, 3));
-  geo.setDrawRange(0, 0);
-
-  const mat = new THREE.LineBasicMaterial({
-    vertexColors: true,
-    blending: THREE.AdditiveBlending,
-    transparent: true,
-    depthWrite: false,
-    opacity: 0.6,
-  });
-
-  lineSystem = new THREE.LineSegments(geo, mat);
-  particleSystem.add(lineSystem);
-}
-
-function updateLines() {
-  if (!lineSystem || !particleSystem) return;
-
-  // standby: 항상 선 보임 / active: scatter 정도에 따라 나타났다 사라짐
-  let lineOpacity;
-  if (currentState === 'standby') {
-    lineOpacity = 0.6;
-  } else {
-    const minT = 0.22;
-    lineOpacity = 0.12 + Math.max(0, (currentScatterT - minT - 0.05) / 0.3) * 0.4;
-  }
-  lineSystem.material.opacity = lineOpacity;
-  if (lineOpacity === 0) {
-    lineSystem.geometry.setDrawRange(0, 0);
-    return;
-  }
-
-  const pos  = particleSystem.geometry.attributes.position.array;
-  const lPos = lineSystem.geometry.attributes.position.array;
-  const lCol = lineSystem.geometry.attributes.color.array;
-  const c    = new THREE.Color(params.particleColor);
-  let count  = 0;
-
-  for (let i = 0; i < numParticles && count < MAX_LINES; i++) {
-    for (let j = i + 1; j < numParticles && count < MAX_LINES; j++) {
-      const dx = pos[i*3] - pos[j*3];
-      const dy = pos[i*3+1] - pos[j*3+1];
-      const dz = pos[i*3+2] - pos[j*3+2];
-      const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-      if (dist < LINE_THRESHOLD) {
-        const alpha = (1 - dist / LINE_THRESHOLD) * 0.5;
-        const base  = count * 6;
-        lPos[base]   = pos[i*3];   lPos[base+1] = pos[i*3+1]; lPos[base+2] = pos[i*3+2];
-        lPos[base+3] = pos[j*3];   lPos[base+4] = pos[j*3+1]; lPos[base+5] = pos[j*3+2];
-        lCol[base]   = c.r*alpha;  lCol[base+1] = c.g*alpha;  lCol[base+2] = c.b*alpha;
-        lCol[base+3] = c.r*alpha;  lCol[base+4] = c.g*alpha;  lCol[base+5] = c.b*alpha;
-        count++;
+  pCtx.lineWidth = currentState === 'speaking' ? 0.8 : 0.5;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const pi = particles[i];
+    for (let j = i + 1; j < PARTICLE_COUNT; j++) {
+      const pj = particles[j];
+      const dx = pi.x - pj.x;
+      const dy = pi.y - pj.y;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < connDistSq) {
+        const dist = Math.sqrt(distSq);
+        const depthFade = (pi.depth + pj.depth) * 0.5;
+        const alpha = (1 - dist / connDist) * lineAlphaBase * depthFade;
+        pCtx.strokeStyle = `rgba(${col.r},${col.g},${col.b},${alpha})`;
+        pCtx.beginPath();
+        pCtx.moveTo(pi.x, pi.y);
+        pCtx.lineTo(pj.x, pj.y);
+        pCtx.stroke();
       }
     }
   }
 
-  lineSystem.geometry.setDrawRange(0, count * 2);
-  lineSystem.geometry.attributes.position.needsUpdate = true;
-  lineSystem.geometry.attributes.color.needsUpdate    = true;
-}
-
-function regenerateScatter() {
-  if (!scatterPositions) return;
-  for (let i = 0; i < numParticles; i++) {
-    const dist = 0.3 + Math.random() * 0.6;
-    const phi   = Math.acos(2 * Math.random() - 1);
-    const theta = Math.random() * Math.PI * 2;
-    scatterPositions[i*3]   = targetPositions[i*3]   + dist * Math.sin(phi) * Math.cos(theta);
-    scatterPositions[i*3+1] = targetPositions[i*3+1] + dist * Math.sin(phi) * Math.sin(theta);
-    scatterPositions[i*3+2] = targetPositions[i*3+2] + dist * Math.cos(phi);
-  }
-}
-
-function initTrailEffect() {
-  const trailMaterial = new THREE.ShaderMaterial({
-    uniforms: { tDiffuse: { value: null }, opacity: { value: 0.9 } },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
-    `,
-    fragmentShader: `
-      uniform sampler2D tDiffuse;
-      uniform float opacity;
-      varying vec2 vUv;
-      void main() { gl_FragColor = opacity * texture2D(tDiffuse, vUv); }
-    `,
-  });
-  const trailPass = new ShaderPass(trailMaterial);
-  trailPass.renderToScreen = true;
-  composer.addPass(trailPass);
-}
-
-function morphToShape(shapeType) {
-  let targetGeometry;
-  let targetVertices = [];
-
-  switch (shapeType) {
-    case 'sphere':
-      // 표면이 아닌 내부를 꽉 채우는 volumetric 분포
-      for (let i = 0; i < numParticles; i++) {
-        const r     = (0.85 + Math.random() * 0.15) * 0.75;
-        const phi   = Math.acos(2 * Math.random() - 1);
-        const theta = Math.random() * Math.PI * 2;
-        targetPositions[i*3]   = r * Math.sin(phi) * Math.cos(theta);
-        targetPositions[i*3+1] = r * Math.sin(phi) * Math.sin(theta);
-        targetPositions[i*3+2] = r * Math.cos(phi);
-      }
-      animationProgress = 0;
-      return;
-    case 'cube':
-      targetGeometry = new THREE.BoxGeometry(2.2, 2.2, 2.2); break;
-    case 'torus':
-      targetGeometry = new THREE.TorusGeometry(0.4, 0.16, 32, 150); break;
-    case 'icosahedron':
-      targetGeometry = new THREE.IcosahedronGeometry(1.7, 3); break;
-    default: return;
-  }
-
-  targetGeometry.computeVertexNormals();
-  const attr = targetGeometry.getAttribute('position');
-  for (let i = 0; i < attr.count; i++) {
-    const v = new THREE.Vector3();
-    v.fromBufferAttribute(attr, i);
-    targetVertices.push(v);
-  }
-
-  for (let i = 0; i < numParticles; i++) {
-    const v = targetVertices[i % targetVertices.length];
-    targetPositions[i*3]   = v.x;
-    targetPositions[i*3+1] = v.y;
-    targetPositions[i*3+2] = v.z;
-  }
-
-  animationProgress = 0;
-  targetGeometry.dispose();
-}
-
-function updateParticleSystem() {
-  if (!particleSystem) return;
-  const colors = particleSystem.geometry.attributes.color.array;
-  const sizes  = particleSystem.geometry.attributes.size.array;
-
-  for (let i = 0; i < numParticles; i++) {
-    const color = new THREE.Color(params.particleColor);
-    color.offsetHSL(0, 0, (Math.random() - 0.5) * 0.5);
-    colors[i*3]   = color.r;
-    colors[i*3+1] = color.g;
-    colors[i*3+2] = color.b;
-    sizes[i] = params.particleSize * (0.8 + Math.random() * 0.4);
-  }
-  particleSystem.geometry.attributes.color.needsUpdate = true;
-  particleSystem.geometry.attributes.size.needsUpdate  = true;
-  particleSystem.material.size = params.particleSize;
-}
-
-function onWindowResize() {
-  const w = container.clientWidth, h = container.clientHeight;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
-  composer.setSize(w, h);
-  trailTexture.setSize(w, h);
-  trailComposer.setSize(w, h);
-}
-
-function animate() {
-  requestAnimationFrame(animate);
-  const delta = clock.getDelta();
-  orbitTime += delta;
-
-  if (particleSystem) {
-    const isActive  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking' || currentState === 'working';
-    const hasPulse  = currentState === 'listening' || currentState === 'speaking' || currentState === 'thinking' || currentState === 'working';
-
-    if (isActive) {
-      particleSystem.rotation.x = 0;
-      particleSystem.rotation.y = 0;
-      particleSystem.rotation.z -= delta * 0.5;
-
-      if (hasPulse) {
-        pulseSpeedPhase += delta * 0.6;
-        pulsePhase += delta * 4.0;
-
-        if (animationProgress >= 1 && scatterPositions) {
-          const amp    = 0.2 + 0.4 * Math.abs(Math.sin(pulseSpeedPhase * 0.4));
-          const minAmp = 0.22 + 0.1 * Math.abs(Math.sin(pulseSpeedPhase * 0.7));
-          const positions = particleSystem.geometry.attributes.position.array;
-          for (let i = 0; i < numParticles; i++) {
-            const dx = targetPositions[i*3];
-            const dy = targetPositions[i*3+1];
-            const dz = targetPositions[i*3+2];
-            const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-            const lag = (0.56 - dist) * 3.5;
-            const spd = particleSpeeds ? particleSpeeds[i] : 1;
-            const pt = minAmp + (1 - Math.cos(pulsePhase * spd - lag)) / 2 * amp;
-            positions[i*3]   = targetPositions[i*3]   + (scatterPositions[i*3]   - targetPositions[i*3])   * pt;
-            positions[i*3+1] = targetPositions[i*3+1] + (scatterPositions[i*3+1] - targetPositions[i*3+1]) * pt;
-            positions[i*3+2] = targetPositions[i*3+2] + (scatterPositions[i*3+2] - targetPositions[i*3+2]) * pt;
-            if (i === 0) currentScatterT = pt;
-            // 위성 궤도: 파티클마다 다른 속도·위상·기울기로 작은 원을 그림
-            const orbitPhase = (i / numParticles) * Math.PI * 6 + orbitTime * spd;
-            const tilt = (i * 2.618) % (Math.PI * 2);
-            const r = 0.018 + spd * 0.008;
-            positions[i*3]   += Math.cos(orbitPhase) * r;
-            positions[i*3+1] += Math.sin(orbitPhase) * Math.cos(tilt) * r;
-            positions[i*3+2] += Math.sin(orbitPhase) * Math.sin(tilt) * r;
-          }
-          particleSystem.geometry.attributes.position.needsUpdate = true;
-        }
-      }
+  // 파티클 렌더 — depth로 크기/알파를 나눠 층이 있는 것처럼 보이게
+  const audioGlow = currentState === 'speaking' ? currentAudioLevel : 0;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const p = particles[i];
+    const burstAmt = Math.min(1, p.burst / 60);
+    let glow, sz;
+    switch (currentState) {
+      case 'speaking':
+        glow = (0.5 + audioGlow * 0.35 + burstAmt * 0.3) * p.depth;
+        sz = p.size * (1 + burstAmt * 0.7);
+        break;
+      case 'listening':
+        glow = (0.55 + burstAmt * 0.3) * p.depth;
+        sz = p.size * (1 + burstAmt * 0.6);
+        break;
+      default:
+        glow = (0.35 + 0.25 * p.depth) * p.depth;
+        sz = p.size;
+    }
+    if (p.hot) {
+      pCtx.shadowBlur = 6 + p.depth * 6 + audioGlow * 6;
+      pCtx.shadowColor = `rgba(${col.r},${col.g},${col.b},${0.5 * p.depth})`;
+      glow = Math.min(1, glow + 0.35);
     } else {
-      // standby: 맥동 없이 천천히 회전
-      particleSystem.rotation.y += delta * params.rotationSpeed;
+      pCtx.shadowBlur = (2 + audioGlow * 6) * p.depth;
+      pCtx.shadowColor = `rgba(${col.r},${col.g},${col.b},${0.3 * p.depth})`;
     }
+    pCtx.fillStyle = `rgba(${col.r},${col.g},${col.b},${Math.min(1, glow)})`;
+    pCtx.beginPath();
+    pCtx.arc(p.x, p.y, Math.max(0.3, sz), 0, Math.PI * 2);
+    pCtx.fill();
+  }
+  pCtx.shadowBlur = 0;
 
-    if (animationProgress < 1) {
-      animationProgress += delta / animationDuration;
-      animationProgress = Math.min(animationProgress, 1);
-
-      const positions = particleSystem.geometry.attributes.position.array;
-      for (let i = 0; i < numParticles * 3; i++) {
-        positions[i] += (targetPositions[i] - positions[i]) * (delta / animationDuration);
-      }
-      particleSystem.geometry.attributes.position.needsUpdate = true;
-    }
+  // 중심 코어 글로우 — 오디오에 반응해서 밝아짐
+  const coreBase = currentState === 'standby' ? 0.05 : 0.08;
+  const coreAlpha = coreBase + audioGlow * 0.18;
+  if (coreAlpha > 0.01) {
+    const coreR = 70 + audioGlow * 40;
+    const grad = pCtx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+    grad.addColorStop(0, `rgba(${col.r},${col.g},${col.b},${coreAlpha})`);
+    grad.addColorStop(1, `rgba(${col.r},${col.g},${col.b},0)`);
+    pCtx.fillStyle = grad;
+    pCtx.beginPath();
+    pCtx.arc(cx, cy, coreR, 0, Math.PI * 2);
+    pCtx.fill();
   }
 
-  updateLines();
-
-  renderer.setRenderTarget(trailTexture);
-  renderer.render(scene, camera);
-  renderer.setRenderTarget(null);
-
-  controls.update();
-  composer.render();
+  requestAnimationFrame(animateParticles);
 }
+requestAnimationFrame(animateParticles);
 
 // 콘솔 테스트용
 window.setState = setJarvisState;

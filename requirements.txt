@@ -9,3 +9,7 @@ websockets
 edge-tts
 duckduckgo-search
 beautifulsoup4
+faster-whisper
+sounddevice
+av
+numpy

@@ -1,4 +1,6 @@
+import sys
 import os
+import io
 import platform
 import json
 import time
@@ -6,19 +8,49 @@ import threading
 import logging
 import subprocess
 import asyncio
-import tempfile
 import requests
+
+# Windows 콘솔 기본 코드페이지(cp949)로는 em-dash 등 일부 유니코드 문자를
+# print()할 때 UnicodeEncodeError로 죽는다. UTF-8로 강제 설정해 방지한다.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+import numpy as np
+import av
+import sounddevice as sd
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
 import speech_recognition as sr
+import pyaudio
 import pyttsx3
 import edge_tts
+from faster_whisper import WhisperModel
 
 # 설정
-OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-OLLAMA_URL      = f"{OLLAMA_BASE_URL}/api/chat"
-OLLAMA_MODEL    = "qwen3:4b"
+CLAUDE_CLI      = "claude.cmd" if platform.system() == "Windows" else "claude"
 SERVER_URL      = "http://127.0.0.1:8000/event"
+WHISPER_MODEL_SIZE = "small"
+AUDIO_SR = 24000
+AUDIO_LEVEL_REF = 4000.0
+AUDIO_BAND_REF = {"low": 200000.0, "mid": 80000.0, "high": 30000.0}
+
+def _get_wasapi_mic_index():
+    # MME(기본) 장치는 Windows 볼륨 설정과 별개로 낮은 게인이 걸려있는 경우가 있어
+    # 실제 시스템 볼륨이 반영되는 WASAPI 입력 장치를 우선 사용한다.
+    try:
+        pa = pyaudio.PyAudio()
+        try:
+            for i in range(pa.get_host_api_count()):
+                info = pa.get_host_api_info_by_index(i)
+                if info.get("name") == "Windows WASAPI":
+                    idx = info.get("defaultInputDevice")
+                    return idx if idx is not None and idx >= 0 else None
+        finally:
+            pa.terminate()
+    except Exception as e:
+        logging.warning(f"WASAPI 마이크 탐색 실패: {e}")
+    return None
+
+MIC_INDEX = _get_wasapi_mic_index() if platform.system() == "Windows" else None
 
 HISTORY_FILE = "conversation_history.json"
 MAX_HISTORY  = 6
@@ -28,10 +60,72 @@ EXIT_WORDS = ["종료", "쉬어", "그만", "꺼져", "끝내", "닫아", "꺼"]
 
 SYSTEM_PROMPT = """\
 너는 자비스라는 AI 어시스턴트야. 간결하고 자연스럽게 한국어로 대답해줘.
-도구 사용 규칙:
-- 사용자가 앱을 열어달라고 하면 무조건 open_app 도구를 호출해. 앱 이름을 모르더라도 그냥 시도해.
-- 최신 정보나 모르는 사실이 필요하면 search_web 도구를 호출해.
-- 도구 결과를 받은 후 자연스럽게 한국어로 답변해줘."""
+
+도구 목록:
+- open_app(name): PC에서 앱을 실행한다. 사용자가 앱을 열어달라고 하면 무조건 이 도구를 호출해라. 앱 이름을 모르더라도 그냥 시도해라.
+- search_web(query): 웹에서 최신 정보를 검색한다. 모르는 정보, 최신 뉴스, 날씨, 주가, 실시간 정보가 필요할 때 사용해라.
+- fetch_page(url): search_web으로 얻은 URL의 상세 페이지 내용을 가져온다.
+
+응답 형식 규칙:
+- 도구 호출이 필요하면 tool_call 필드를 채우고 reply는 null로 남겨라.
+- 도구 호출이 필요없으면 reply에 자연스러운 한국어 답변을 채우고 tool_call은 null로 남겨라.
+- 대화 기록은 "사용자: ...", "자비스: ...", "[도구 결과 - 이름]: ..." 형식으로 주어진다."""
+
+CLAUDE_JSON_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "reply": {"type": ["string", "null"]},
+        "tool_call": {
+            "anyOf": [
+                {"type": "null"},
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"const": "open_app"},
+                        "args": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "required": ["name"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["name", "args"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"const": "search_web"},
+                        "args": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["name", "args"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"const": "fetch_page"},
+                        "args": {
+                            "type": "object",
+                            "properties": {"url": {"type": "string"}},
+                            "required": ["url"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["name", "args"],
+                    "additionalProperties": False,
+                },
+            ]
+        },
+    },
+    "required": ["reply", "tool_call"],
+    "additionalProperties": False,
+}, ensure_ascii=False)
 
 def get_app_commands():
     if platform.system() == "Windows":
@@ -52,60 +146,6 @@ def get_app_commands():
         }
 
 APPS = get_app_commands()
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "open_app",
-            "description": "PC에서 앱을 실행합니다. 사용자가 앱을 열어달라고 요청할 때 사용하세요.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "실행할 앱 이름. 예: chrome, notepad, explorer, calculator, vscode, 또는 사용자가 요청한 앱 이름"
-                    }
-                },
-                "required": ["name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "웹에서 최신 정보를 검색합니다. 모르는 정보, 최신 뉴스, 날씨, 주가, 실시간 정보가 필요할 때 사용하세요.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "검색어"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_page",
-            "description": "URL의 웹 페이지 내용을 가져옵니다. search_web으로 URL을 얻은 후 상세 내용이 필요할 때 사용하세요.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "가져올 웹 페이지 URL"
-                    }
-                },
-                "required": ["url"]
-            }
-        }
-    }
-]
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
@@ -153,44 +193,97 @@ def _speak_pyttsx3(text):
         engine.runAndWait()
         engine.stop()
 
-async def _tts_async(text, path):
+async def _edge_tts_bytes(text):
     communicate = edge_tts.Communicate(text, VOICE)
-    await communicate.save(path)
+    buf = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            buf.write(chunk["data"])
+    return buf.getvalue()
 
+def _decode_mp3_to_pcm(mp3_bytes):
+    container = av.open(io.BytesIO(mp3_bytes))
+    stream = container.streams.audio[0]
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=AUDIO_SR)
+    frames = []
+    for packet in container.demux(stream):
+        for frame in packet.decode():
+            for rframe in resampler.resample(frame):
+                frames.append(rframe.to_ndarray())
+    if not frames:
+        return np.zeros(0, dtype=np.int16)
+    return np.concatenate(frames, axis=1).flatten()
+
+def _band_levels(chunk):
+    fchunk = chunk.astype(np.float32)
+    rms = float(np.sqrt(np.mean(fchunk ** 2)))
+    windowed = fchunk * np.hanning(len(fchunk))
+    fft = np.abs(np.fft.rfft(windowed))
+    freqs = np.fft.rfftfreq(len(fchunk), d=1.0 / AUDIO_SR)
+
+    def band(lo, hi, ref):
+        mask = (freqs >= lo) & (freqs < hi)
+        v = float(fft[mask].mean()) if mask.any() else 0.0
+        return min(1.0, v / ref)
+
+    return (
+        min(1.0, rms / AUDIO_LEVEL_REF),
+        band(50, 400, AUDIO_BAND_REF["low"]),
+        band(400, 2000, AUDIO_BAND_REF["mid"]),
+        band(2000, 8000, AUDIO_BAND_REF["high"]),
+    )
+
+def _play_pcm_with_levels(pcm):
+    chunk_samples = int(AUDIO_SR * 0.05)
+    sd.play(pcm, samplerate=AUDIO_SR, blocking=False)
+    try:
+        for start in range(0, len(pcm), chunk_samples):
+            chunk = pcm[start:start + chunk_samples]
+            if len(chunk) == 0:
+                continue
+            value, low, mid, high = _band_levels(chunk)
+            send_event(type="audio_level", value=value, low=low, mid=mid, high=high)
+            time.sleep(chunk_samples / AUDIO_SR)
+        sd.wait()
+    finally:
+        send_event(type="audio_level", value=0, low=0, mid=0, high=0)
 
 def speak(text):
     print(f"자비스: {text}")
     set_state("speaking")
     send_chat("jarvis", text)
 
-    if platform.system() == "Darwin":
-        tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-        tmp.close()
-        try:
-            asyncio.run(_tts_async(text, tmp.name))
-            subprocess.run(["afplay", tmp.name], check=True)
-            time.sleep(0.3)
-        except Exception as e:
-            logging.warning(f"edge-tts 실패, pyttsx3 폴백: {e}")
-            _speak_pyttsx3(text)
-        finally:
-            try:
-                os.remove(tmp.name)
-            except Exception:
-                pass
-    else:
+    try:
+        mp3_bytes = asyncio.run(_edge_tts_bytes(text))
+        pcm = _decode_mp3_to_pcm(mp3_bytes)
+        if len(pcm) == 0:
+            raise RuntimeError("빈 오디오 데이터")
+        _play_pcm_with_levels(pcm)
+    except Exception as e:
+        logging.warning(f"edge-tts 재생 실패, pyttsx3 폴백: {e}")
         try:
             _speak_pyttsx3(text)
-        except Exception as e:
-            logging.warning(f"speak 실패: {e}")
+        except Exception as e2:
+            logging.warning(f"speak 실패: {e2}")
 
     set_state("standby")
 
 # STT
+logging.info(f"Whisper 모델 로딩 중... ({WHISPER_MODEL_SIZE})")
+_whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
+logging.info("Whisper 모델 로딩 완료")
+
+def transcribe(audio):
+    wav_bytes = audio.get_wav_data()
+    segments, _ = _whisper_model.transcribe(
+        io.BytesIO(wav_bytes), language="ko", beam_size=1, vad_filter=True
+    )
+    return "".join(seg.text for seg in segments).strip()
+
 def listen():
     r = sr.Recognizer()
     try:
-        with sr.Microphone() as source:
+        with sr.Microphone(device_index=MIC_INDEX) as source:
             r.adjust_for_ambient_noise(source)
             try:
                 logging.info("listen: start")
@@ -205,14 +298,14 @@ def listen():
         return None
     try:
         t_rec0 = time.time()
-        text = r.recognize_google(audio, language="ko-KR")
+        text = transcribe(audio)
         logging.info(f"listen: recognize {time.time()-t_rec0:.2f}s -> {text[:40]!r}")
+        if not text:
+            return None
         print(f"나: {text}")
         return text
-    except sr.UnknownValueError:
-        return None
-    except sr.RequestError:
-        speak("인터넷 연결이 불안정합니다.")
+    except Exception as e:
+        logging.warning(f"STT 실패: {e}")
         return None
 
 # 웹 도구
@@ -337,6 +430,39 @@ def call_tool(name, args):
 
 _agent_busy = threading.Event()
 
+# Claude CLI 호출
+def _flatten(text):
+    # claude.cmd는 배치 파일이라 cmd.exe를 거쳐 실행되는데, 인자에 개행이 있으면
+    # 그 뒤의 옵션이 통째로 유실된다 (예: --output-format json이 무시됨).
+    return " ".join(text.split())
+
+def call_claude(prompt_text):
+    try:
+        result = subprocess.run(
+            [
+                CLAUDE_CLI, "-p", _flatten(prompt_text),
+                "--append-system-prompt", _flatten(SYSTEM_PROMPT),
+                "--tools", "",
+                "--output-format", "json",
+                "--no-session-persistence",
+                "--json-schema", CLAUDE_JSON_SCHEMA,
+            ],
+            capture_output=True, text=True, encoding="utf-8",
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+        data = json.loads(result.stdout)
+    except Exception as e:
+        logging.warning(f"call_claude 실패: {e}")
+        return None, None
+
+    if data.get("is_error"):
+        logging.warning(f"call_claude 오류: {data.get('result')}")
+        return None, None
+
+    out = data.get("structured_output") or {}
+    return out.get("reply"), out.get("tool_call")
+
 # 에이전트 루프
 def run_agent(user_input):
     _agent_busy.set()
@@ -346,55 +472,30 @@ def run_agent(user_input):
     send_chat("user", user_input)
 
     recent = conversation_history[-MAX_HISTORY:]
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for m in recent:
-        messages.append({"role": m["role"], "content": m["content"]})
-    messages.append({"role": "user", "content": user_input})
+    context_lines = [
+        f"{'사용자' if m['role'] == 'user' else '자비스'}: {m['content']}"
+        for m in recent
+    ]
+    context_lines.append(f"사용자: {user_input}")
 
     final_reply = "죄송해요, 응답 처리 중 오류가 발생했어요."
 
-    for step in range(5):
-        try:
-            resp = requests.post(OLLAMA_URL, json={
-                "model": OLLAMA_MODEL,
-                "messages": messages,
-                "tools": TOOLS,
-                "stream": False,
-            }, timeout=(5, 120))
-        except Exception as e:
-            logging.warning(f"run_agent 요청 실패: {e}")
+    for step in range(3):
+        reply, tool_call = call_claude("\n".join(context_lines))
+
+        if reply is None and tool_call is None:
             break
 
-        data = resp.json()
-        if "message" not in data:
-            logging.warning(f"run_agent 응답 오류: {data}")
-            break
-
-        msg = data["message"]
-        content = msg.get("content", "").strip()
-        if "</think>" in content:
-            content = content[content.rfind("</think>") + 8:].strip()
-
-        tool_calls = msg.get("tool_calls", [])
-
-        if not tool_calls:
-            final_reply = content or final_reply
-            break
-
-        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-
-        for tc in tool_calls:
-            fn = tc.get("function", {})
-            tool_name = fn.get("name", "")
-            tool_args = fn.get("arguments", {})
-            if isinstance(tool_args, str):
-                try:
-                    tool_args = json.loads(tool_args)
-                except Exception:
-                    tool_args = {}
+        if tool_call:
+            tool_name = tool_call.get("name", "")
+            tool_args = tool_call.get("args", {})
             logging.info(f"tool_call[{step}]: {tool_name}({tool_args})")
             result = call_tool(tool_name, tool_args)
-            messages.append({"role": "tool", "content": result, "name": tool_name})
+            context_lines.append(f"[도구 결과 - {tool_name}]: {result}")
+            continue
+
+        final_reply = reply or final_reply
+        break
 
     try:
         conversation_history.append({"role": "user", "content": user_input})
@@ -405,20 +506,6 @@ def run_agent(user_input):
     finally:
         _agent_busy.clear()
         set_state("standby")
-
-# Ollama 준비 대기
-def wait_for_ollama_ready(timeout=180, interval=3):
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            resp = requests.get(f"{OLLAMA_BASE_URL}/api/version", timeout=5)
-            if resp.status_code == 200:
-                logging.info("Ollama API ready")
-                return True
-        except requests.RequestException:
-            pass
-        time.sleep(interval)
-    return False
 
 # 유틸
 def is_wake_word(text):
@@ -447,21 +534,6 @@ def handle_command(user_input, source='voice'):
 # main
 set_state("standby")
 print("자비스 대기 중...")
-
-def _warmup_model():
-    if not wait_for_ollama_ready(timeout=120):
-        logging.info("warmup: Ollama 준비 안 됨")
-        return
-    try:
-        t0 = time.time()
-        payload = {"model": OLLAMA_MODEL, "messages": [{"role": "user", "content": "안녕"}], "stream": False}
-        r = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=payload, timeout=120)
-        if r.status_code == 200:
-            logging.info(f"warmup 완료 {time.time()-t0:.2f}s")
-    except Exception as e:
-        logging.info(f"warmup 실패: {e}")
-
-threading.Thread(target=_warmup_model, daemon=True).start()
 
 while True:
     if _agent_busy.is_set():

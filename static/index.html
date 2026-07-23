@@ -4,14 +4,6 @@
   <meta charset="UTF-8">
   <title>JARVIS</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.162.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.162.0/examples/jsm/"
-    }
-  }
-  </script>
 </head>
 <body>
 <div id="app">
@@ -96,7 +88,7 @@
     <!-- 가운데: 파티클 구체 -->
     <main class="center">
       <div id="sphere-wrap">
-        <div id="sphere-container"></div>
+        <canvas id="particleCanvas" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:500px;height:500px;z-index:2;pointer-events:none;"></canvas>
 <div class="sphere-labels">
           <div class="jarvis-label">J.A.R.V.I.S.</div>
           <div class="status-row">
