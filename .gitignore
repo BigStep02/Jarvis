@@ -1,2 +1,10 @@
 .env
 venv/
+.venv/
+__pycache__/
+*.pyc
+logs/
+run_main.pid
+conversation_history.json
+*.wav
+*.mp3
