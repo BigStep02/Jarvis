@@ -246,11 +246,11 @@ function animateParticles(timestamp) {
         const wx = Math.sin(t * p.driftSpeedX + p.driftSeedX) * p.driftAmp * 0.5;
         const wy = Math.cos(t * p.driftSpeedY + p.driftSeedY) * p.driftAmp * 0.5;
         const bandMix = 0.5 + 0.5 * Math.sin(p.phase * 1.9);
-        const basePulse = Math.pow(Math.sin(t * 3.2 + p.phase * 0.5), 2) * 20;
-        const audioDrive = currentAudioLevel * (130 + bandMix * 70)
-                          + currentAudioLow * 50 + currentAudioMid * 34
-                          + currentAudioHigh * bandMix * 40;
-        const targetBurst = Math.min(300, (basePulse + audioDrive) * p.burstGain);
+        const basePulse = Math.pow(Math.sin(t * 3.2 + p.phase * 0.5), 2) * 8;
+        const audioDrive = currentAudioLevel * (40 + bandMix * 20)
+                          + currentAudioLow * 15 + currentAudioMid * 10
+                          + currentAudioHigh * bandMix * 12;
+        const targetBurst = Math.min(80, (basePulse + audioDrive) * p.burstGain);
         p.burst += (targetBurst - p.burst) * 0.26;
         const r = p.baseRadius * breathe + p.burst;
         const tx = cx + Math.cos(p.baseAngle) * r + wx;
@@ -351,6 +351,73 @@ function animateParticles(timestamp) {
   requestAnimationFrame(animateParticles);
 }
 requestAnimationFrame(animateParticles);
+
+// ─── System Stats 폴링 ───
+async function pollStats() {
+  try {
+    const r = await fetch('/stats');
+    const d = await r.json();
+
+    document.getElementById('cpu-val').textContent  = d.cpu.toFixed(1) + '%';
+    document.getElementById('cpu-bar').style.width  = d.cpu + '%';
+    document.getElementById('cpu-pct').textContent  = d.cpu.toFixed(1) + '%';
+    document.getElementById('ram-val').textContent  = d.ram_used + ' / ' + d.ram_total + ' GB';
+    document.getElementById('ram-bar').style.width  = d.ram_pct + '%';
+    document.getElementById('mem-pct').textContent  = d.ram_pct.toFixed(1) + '%';
+    document.getElementById('disk-val').textContent = d.disk_used + '/' + d.disk_total + 'G';
+
+    const load = d.cpu;
+    const loadBadge = document.getElementById('load-badge');
+    const loadBar   = document.getElementById('load-bar');
+    loadBar.style.width = load + '%';
+    if (load < 40) { loadBadge.textContent = 'Normal';   loadBadge.className = 'load-badge'; }
+    else if (load < 75) { loadBadge.textContent = 'Medium'; loadBadge.className = 'load-badge warn'; }
+    else { loadBadge.textContent = 'High'; loadBadge.className = 'load-badge danger'; }
+  } catch (_) {}
+}
+pollStats();
+setInterval(pollStats, 3000);
+
+// ─── Weather ───
+const WX_ICONS = {
+  0: '☀️', 1: '🌤', 2: '⛅', 3: '☁️',
+  45: '🌫', 48: '🌫',
+  51: '🌦', 53: '🌦', 55: '🌦',
+  61: '🌧', 63: '🌧', 65: '🌧',
+  71: '🌨', 73: '🌨', 75: '🌨',
+  80: '🌦', 81: '🌦', 82: '🌦',
+  95: '⛈',
+};
+const WX_DESC = {
+  0: '맑음', 1: '대체로 맑음', 2: '구름 조금', 3: '흐림',
+  45: '안개', 48: '안개',
+  51: '이슬비', 53: '이슬비', 55: '이슬비',
+  61: '비', 63: '비', 65: '강한 비',
+  71: '눈', 73: '눈', 75: '강한 눈',
+  80: '소나기', 81: '소나기', 82: '강한 소나기',
+  95: '뇌우',
+};
+
+async function fetchWeather() {
+  try {
+    const r = await fetch('/weather');
+    const d = await r.json();
+    const c = d.current;
+    const code = c.weather_code;
+    const city = d.city || 'Unknown';
+    const country = d.country || '';
+    document.getElementById('w-temp').textContent  = c.temperature_2m.toFixed(1) + '°C';
+    document.getElementById('w-desc').textContent  = WX_DESC[code] ?? '—';
+    document.getElementById('w-hum').textContent   = c.relative_humidity_2m + '%';
+    document.getElementById('w-wind').textContent  = c.wind_speed_10m.toFixed(1) + ' m/s';
+    document.getElementById('w-feel').textContent  = c.apparent_temperature.toFixed(1) + '°C';
+    document.getElementById('w-loc').textContent   = city + (country ? ', ' + country : '');
+    document.querySelector('.weather-icon').textContent = WX_ICONS[code] ?? '🌡';
+    document.querySelector('.temp-badge').textContent   = '🌡 ' + c.temperature_2m.toFixed(1) + '°C ' + city;
+  } catch (_) {}
+}
+fetchWeather();
+setInterval(fetchWeather, 10 * 60 * 1000);
 
 // 콘솔 테스트용
 window.setState = setJarvisState;

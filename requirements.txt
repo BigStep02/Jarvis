@@ -13,3 +13,6 @@ faster-whisper
 sounddevice
 av
 numpy
+psutil
+httpx
+rumps

@@ -28,7 +28,14 @@ from faster_whisper import WhisperModel
 # 설정
 CLAUDE_CLI      = "claude.cmd" if platform.system() == "Windows" else "claude"
 SERVER_URL      = "http://127.0.0.1:8000/event"
-WHISPER_MODEL_SIZE = "small"
+def _load_app_settings():
+    try:
+        with open("settings.json", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"whisper_model": "small"}
+
+WHISPER_MODEL_SIZE = _load_app_settings().get("whisper_model", "small")
 AUDIO_SR = 24000
 AUDIO_LEVEL_REF = 4000.0
 AUDIO_BAND_REF = {"low": 200000.0, "mid": 80000.0, "high": 30000.0}
@@ -248,7 +255,19 @@ def _play_pcm_with_levels(pcm):
     finally:
         send_event(type="audio_level", value=0, low=0, mid=0, high=0)
 
+def _strip_markdown(text):
+    import re
+    text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', text)
+    text = re.sub(r'#+\s*', '', text)
+    text = re.sub(r'`{1,3}[^`]*`{1,3}', '', text)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'^[-*]\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\n+', ' ', text)
+    return text.strip()
+
 def speak(text):
+    text = _strip_markdown(text)
     print(f"자비스: {text}")
     set_state("speaking")
     send_chat("jarvis", text)
@@ -269,27 +288,50 @@ def speak(text):
     set_state("standby")
 
 # STT
+_whisper_lock = threading.Lock()
+_current_model_size = WHISPER_MODEL_SIZE
+
 logging.info(f"Whisper 모델 로딩 중... ({WHISPER_MODEL_SIZE})")
 _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
 logging.info("Whisper 모델 로딩 완료")
 
+def _watch_settings():
+    global _whisper_model, _current_model_size
+    while True:
+        time.sleep(3)
+        try:
+            size = _load_app_settings().get("whisper_model", "small")
+            if size != _current_model_size and not _agent_busy.is_set():
+                logging.info(f"모델 변경 감지: {_current_model_size} → {size}")
+                new_model = WhisperModel(size, device="cpu", compute_type="int8")
+                with _whisper_lock:
+                    _whisper_model = new_model
+                    _current_model_size = size
+                logging.info(f"모델 교체 완료: {size}")
+        except Exception as e:
+            logging.warning(f"설정 감시 오류: {e}")
+
+threading.Thread(target=_watch_settings, daemon=True).start()
+
 def transcribe(audio):
     wav_bytes = audio.get_wav_data()
-    segments, _ = _whisper_model.transcribe(
-        io.BytesIO(wav_bytes), language="ko", beam_size=1, vad_filter=True
+    with _whisper_lock:
+        model = _whisper_model
+    segments, _ = model.transcribe(
+        io.BytesIO(wav_bytes), language="ko", beam_size=5, vad_filter=True,
+        initial_prompt="자비스, 안녕하세요. 한국어로 말씀해 주세요."
     )
     return "".join(seg.text for seg in segments).strip()
 
-def listen():
+def _listen_raw(timeout, phrase_time_limit, pause_threshold=1.5):
     r = sr.Recognizer()
+    r.pause_threshold = pause_threshold
+    r.non_speaking_duration = 0.6
     try:
         with sr.Microphone(device_index=MIC_INDEX) as source:
-            r.adjust_for_ambient_noise(source)
+            r.adjust_for_ambient_noise(source, duration=0.3)
             try:
-                logging.info("listen: start")
-                t0 = time.time()
-                audio = r.listen(source, timeout=5)
-                logging.info(f"listen: audio captured {time.time()-t0:.2f}s")
+                audio = r.listen(source, timeout=timeout, phrase_time_limit=phrase_time_limit)
             except sr.WaitTimeoutError:
                 return None
     except Exception as e:
@@ -297,16 +339,25 @@ def listen():
         time.sleep(1)
         return None
     try:
-        t_rec0 = time.time()
         text = transcribe(audio)
-        logging.info(f"listen: recognize {time.time()-t_rec0:.2f}s -> {text[:40]!r}")
-        if not text:
+        if not text or len(text) < 2:
             return None
-        print(f"나: {text}")
         return text
     except Exception as e:
         logging.warning(f"STT 실패: {e}")
         return None
+
+def listen_for_wake():
+    """웨이크워드 감지 전용 — 짧게 듣고 텍스트만 반환, UI 상태 변경 없음"""
+    return _listen_raw(timeout=3, phrase_time_limit=4, pause_threshold=0.8)
+
+def listen():
+    """명령어 수신 — 길게 듣고 로그 출력"""
+    text = _listen_raw(timeout=5, phrase_time_limit=20, pause_threshold=1.5)
+    if text:
+        logging.info(f"listen: {text[:40]!r}")
+        print(f"나: {text}")
+    return text
 
 # 웹 도구
 def search_web(query, max_results=5):
@@ -397,7 +448,10 @@ def call_tool(name, args):
         if not cmd:
             path = find_app(app_name)
             if path:
-                os.startfile(path)
+                if platform.system() == "Windows":
+                    os.startfile(path)
+                else:
+                    subprocess.run(["open", path])
                 time.sleep(0.5)
                 return f"{app_name}을(를) 열었습니다."
             if platform.system() == "Windows":
@@ -469,7 +523,6 @@ def run_agent(user_input):
     t0 = time.time()
     logging.info(f"run_agent: {user_input[:40]!r}")
     set_state("thinking")
-    send_chat("user", user_input)
 
     recent = conversation_history[-MAX_HISTORY:]
     context_lines = [
@@ -542,27 +595,30 @@ while True:
 
     set_state("standby")
 
+    # UI 텍스트 명령 우선 처리
     text_cmd = poll_text_command()
     if text_cmd:
         handle_command(text_cmd, source='ui')
         continue
 
-    set_state("listening")
-    user_input = listen()
-
-    if not user_input:
+    # 웨이크워드만 조용히 감지 (UI는 standby 유지)
+    wake_text = listen_for_wake()
+    if not wake_text:
         continue
 
-    if wants_to_exit(user_input):
+    if wants_to_exit(wake_text):
         speak("종료할게요. 안녕히 계세요!")
         time.sleep(3)
         break
 
-    if is_wake_word(user_input.strip()):
-        speak("네, 말씀하세요!")
-        set_state("listening")
-        user_input = listen()
-        if not user_input:
-            continue
+    if not is_wake_word(wake_text):
+        continue  # 웨이크워드 아니면 무시
+
+    # 웨이크워드 감지 → listening 상태로 전환
+    speak("네, 말씀하세요!")
+    set_state("listening")
+    user_input = listen()
+    if not user_input:
+        continue
 
     handle_command(user_input)
