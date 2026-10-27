@@ -78,8 +78,11 @@ SYSTEM_PROMPT = """\
   예) 아이메시지: tell application "Messages" to send "내용" to participant "번호나 이메일" of (1st account whose service type = iMessage)
   예) 미리알림: tell application "Reminders" to make new reminder with properties {name:"내용"}
   예) 다크모드: tell application "System Events" to tell appearance preferences to set dark mode to not dark mode
-  예) 연락처 조회: tell application "Contacts" to get {name, value of phones} of every person whose name contains "이름"
-  "do shell script"는 사용 금지.
+  "do shell script"는 사용 금지. 연락처(Contacts)는 run_applescript로 조회하지 말고 find_contact를 써라.
+- find_contact(name): 연락처에서 이름으로 검색해 "이름: 번호" 목록을 돌려준다 (최대 10명).
+  연락처 조회·메시지·앱 제어 요청은 "할 수 없다"고 답하지 말고 반드시 run_applescript로 직접 시도해라. 이전 대화에서 실패했더라도 다시 시도해라.
+  전화번호·연락처·전송 완료 같은 사실은 이번 턴의 [도구 결과]에 있는 것만 말해라. 절대 지어내지 마라. 이전 대화의 답변은 도구 결과가 아니다.
+  도구 결과가 오류이면 오류 내용을 그대로 짧게 알려줘라 (권한 문제면 시스템 설정 → 개인정보 보호 및 보안 → 자동화에서 허용하라고 안내).
   이름으로 메시지를 보낼 땐 먼저 연락처를 조회하고, 여러 명이면 이름과 번호를 알려주고 누구인지 물어봐라.
   메시지 전송 스크립트는 바로 실행되지 않고 보류된다. 도구 결과가 [확인 필요]이면 받는 사람(이름·번호)과 내용을 말하고 보낼지 물어봐라.
 
@@ -145,6 +148,20 @@ CLAUDE_JSON_SCHEMA = json.dumps({
                             "type": "object",
                             "properties": {"script": {"type": "string"}},
                             "required": ["script"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["name", "args"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"const": "find_contact"},
+                        "args": {
+                            "type": "object",
+                            "properties": {"name": {"type": "string"}},
+                            "required": ["name"],
                             "additionalProperties": False,
                         },
                     },
@@ -496,12 +513,48 @@ def run_applescript(script, confirmed=False):
             ["osascript", "-e", script],
             capture_output=True, text=True, timeout=15,
         )
+        # -600: 대상 앱이 꺼져 있음 → 백그라운드로 실행한 뒤 한 번 더 시도
+        if result.returncode != 0 and "(-600)" in result.stderr:
+            for app in set(re.findall(r'tell application "([^"]+)"', script)):
+                subprocess.run(["open", "-gja", app])
+            time.sleep(1.5)
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=15,
+            )
     except subprocess.TimeoutExpired:
         return "AppleScript 실행 시간이 초과됐어요."
     logging.info(f"run_applescript: rc={result.returncode} {script[:80]!r}")
     if result.returncode != 0:
+        logging.info(f"run_applescript stderr: {result.stderr.strip()[:200]}")
         return f"AppleScript 오류: {result.stderr.strip()[:300]}"
     return result.stdout.strip() or "실행 완료"
+
+def find_contact(query):
+    # 따옴표·역슬래시는 AppleScript 문자열을 깨뜨리므로 제거
+    q = query.replace('"', "").replace("\\", "").strip()
+    if not q:
+        return "검색할 이름이 없어요."
+    script = f'''tell application "Contacts"
+    set out to ""
+    set cnt to 0
+    repeat with p in (every person whose name contains "{q}")
+        set cnt to cnt + 1
+        if cnt > 10 then exit repeat
+        set out to out & (name of p) & ":"
+        repeat with ph in (phones of p)
+            set out to out & " " & (value of ph)
+        end repeat
+        set out to out & linefeed
+    end repeat
+    return out
+end tell'''
+    result = run_applescript(script)
+    if result.startswith("AppleScript 오류"):
+        return result
+    if result == "실행 완료":
+        return f"'{q}' 이름의 연락처가 없어요."
+    return result
 
 # 도구 실행
 def call_tool(name, args):
@@ -548,6 +601,10 @@ def call_tool(name, args):
         script = args.get("script", "")
         set_state("working")
         return run_applescript(script)
+
+    elif name == "find_contact":
+        set_state("working")
+        return find_contact(args.get("name", ""))
 
     return f"알 수 없는 도구: {name}"
 

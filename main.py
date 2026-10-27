@@ -64,8 +64,24 @@ async def _get_location(client: httpx.AsyncClient):
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# 수정한 JS/CSS가 바로 반영되도록 브라우저 캐시를 끈다
+@app.middleware("http")
+async def no_cache(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 connected_clients: list[WebSocket] = []
 command_queue: deque = deque()
+
+_last_command = ""
+_last_command_ts = 0.0
+
+def _is_ime_leftover(text):
+    """직전 명령의 마지막 글자 하나가 곧바로 따로 들어온 경우 (한글 IME 잔여 글자)"""
+    return (len(text) == 1 and _last_command.endswith(text)
+            and _time.time() - _last_command_ts < 1.5)
 
 @app.get("/")
 async def root():
@@ -74,6 +90,7 @@ async def root():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global _last_command, _last_command_ts
     await websocket.accept()
     connected_clients.append(websocket)
     try:
@@ -81,7 +98,11 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             msg = json.loads(data)
             if msg.get("type") == "text_command":
-                command_queue.append(msg["text"])
+                text = msg["text"].strip()
+                if not text or _is_ime_leftover(text):
+                    continue
+                _last_command, _last_command_ts = text, _time.time()
+                command_queue.append(text)
                 await broadcast({"type": "chat", "role": "user", "text": msg["text"]})
     except WebSocketDisconnect:
         if websocket in connected_clients:
