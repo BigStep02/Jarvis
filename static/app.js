@@ -77,17 +77,21 @@ function addChat(role, text) {
 }
 
 // ─── 텍스트 입력 ───
-document.getElementById('send-btn').addEventListener('click', sendText);
 document.getElementById('text-input').addEventListener('keydown', (e) => {
+  // 한글 조합 중 Enter는 무시 (조합 확정 후 오는 Enter만 처리 → 마지막 글자 중복 전송 방지)
+  if (e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Enter') sendText();
 });
+document.getElementById('send-btn').addEventListener('click', sendText);
 
 function sendText() {
   const input = document.getElementById('text-input');
+  input.blur();                   // IME 조합 중인 글자 즉시 확정
   const text = input.value.trim();
-  if (!text) return;
-  ws.send(JSON.stringify({ type: 'text_command', text }));
   input.value = '';
+  if (!text) { input.focus(); return; }
+  ws.send(JSON.stringify({ type: 'text_command', text }));
+  input.focus();
 }
 
 // ─── 시계 / 날짜 ───

@@ -1,6 +1,7 @@
 import sys
 import os
 import io
+import re
 import platform
 import json
 import time
@@ -72,6 +73,12 @@ SYSTEM_PROMPT = """\
 - open_app(name): PC에서 앱을 실행한다. 사용자가 앱을 열어달라고 하면 무조건 이 도구를 호출해라. 앱 이름을 모르더라도 그냥 시도해라.
 - search_web(query): 웹에서 최신 정보를 검색한다. 모르는 정보, 최신 뉴스, 날씨, 주가, 실시간 정보가 필요할 때 사용해라.
 - fetch_page(url): search_web으로 얻은 URL의 상세 페이지 내용을 가져온다.
+- run_applescript(script): macOS AppleScript를 실행하고 결과를 돌려받는다. 앱 안의 동작이 필요할 때 사용해라.
+  예) 볼륨: set volume output volume 50 / 음악: tell application "Music" to playpause
+  예) 아이메시지: tell application "Messages" to send "내용" to participant "번호나 이메일" of (1st account whose service type = iMessage)
+  예) 미리알림: tell application "Reminders" to make new reminder with properties {name:"내용"}
+  예) 다크모드: tell application "System Events" to tell appearance preferences to set dark mode to not dark mode
+  "do shell script"는 사용 금지. 메시지 전송처럼 되돌릴 수 없는 동작은 받는 사람과 내용이 분명할 때만 실행해라.
 
 응답 형식 규칙:
 - 도구 호출이 필요하면 tool_call 필드를 채우고 reply는 null로 남겨라.
@@ -121,6 +128,20 @@ CLAUDE_JSON_SCHEMA = json.dumps({
                             "type": "object",
                             "properties": {"url": {"type": "string"}},
                             "required": ["url"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "required": ["name", "args"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"const": "run_applescript"},
+                        "args": {
+                            "type": "object",
+                            "properties": {"script": {"type": "string"}},
+                            "required": ["script"],
                             "additionalProperties": False,
                         },
                     },
@@ -256,7 +277,6 @@ def _play_pcm_with_levels(pcm):
         send_event(type="audio_level", value=0, low=0, mid=0, high=0)
 
 def _strip_markdown(text):
-    import re
     text = re.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)
     text = re.sub(r'_{1,3}([^_]+)_{1,3}', r'\1', text)
     text = re.sub(r'#+\s*', '', text)
@@ -439,6 +459,24 @@ def find_app(query):
                 return app
     return None
 
+def run_applescript(script):
+    if platform.system() != "Darwin":
+        return "AppleScript는 macOS에서만 실행할 수 있어요."
+    # 셸 명령 실행은 막는다 (음성 오인식으로 임의 명령이 실행되는 것 방지)
+    if "do shell script" in script.lower():
+        return "보안상 do shell script는 실행할 수 없어요."
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return "AppleScript 실행 시간이 초과됐어요."
+    logging.info(f"run_applescript: rc={result.returncode} {script[:80]!r}")
+    if result.returncode != 0:
+        return f"AppleScript 오류: {result.stderr.strip()[:300]}"
+    return result.stdout.strip() or "실행 완료"
+
 # 도구 실행
 def call_tool(name, args):
     if name == "open_app":
@@ -479,6 +517,11 @@ def call_tool(name, args):
         url = args.get("url", "")
         set_state("working")
         return fetch_page(url) or "페이지를 가져올 수 없습니다."
+
+    elif name == "run_applescript":
+        script = args.get("script", "")
+        set_state("working")
+        return run_applescript(script)
 
     return f"알 수 없는 도구: {name}"
 
@@ -533,7 +576,8 @@ def run_agent(user_input):
 
     final_reply = "죄송해요, 응답 처리 중 오류가 발생했어요."
 
-    for step in range(3):
+    last_result = None
+    for step in range(5):
         reply, tool_call = call_claude("\n".join(context_lines))
 
         if reply is None and tool_call is None:
@@ -545,10 +589,15 @@ def run_agent(user_input):
             logging.info(f"tool_call[{step}]: {tool_name}({tool_args})")
             result = call_tool(tool_name, tool_args)
             context_lines.append(f"[도구 결과 - {tool_name}]: {result}")
+            last_result = result
             continue
 
         final_reply = reply or final_reply
         break
+    else:
+        # 도구 호출만 하다 횟수를 다 쓰면 오류 문구 대신 마지막 도구 결과를 말한다
+        if last_result and len(last_result) < 200:
+            final_reply = last_result
 
     try:
         conversation_history.append({"role": "user", "content": user_input})
