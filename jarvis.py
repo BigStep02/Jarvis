@@ -78,7 +78,10 @@ SYSTEM_PROMPT = """\
   예) 아이메시지: tell application "Messages" to send "내용" to participant "번호나 이메일" of (1st account whose service type = iMessage)
   예) 미리알림: tell application "Reminders" to make new reminder with properties {name:"내용"}
   예) 다크모드: tell application "System Events" to tell appearance preferences to set dark mode to not dark mode
-  "do shell script"는 사용 금지. 메시지 전송처럼 되돌릴 수 없는 동작은 받는 사람과 내용이 분명할 때만 실행해라.
+  예) 연락처 조회: tell application "Contacts" to get {name, value of phones} of every person whose name contains "이름"
+  "do shell script"는 사용 금지.
+  이름으로 메시지를 보낼 땐 먼저 연락처를 조회하고, 여러 명이면 이름과 번호를 알려주고 누구인지 물어봐라.
+  메시지 전송 스크립트는 바로 실행되지 않고 보류된다. 도구 결과가 [확인 필요]이면 받는 사람(이름·번호)과 내용을 말하고 보낼지 물어봐라.
 
 응답 형식 규칙:
 - 도구 호출이 필요하면 tool_call 필드를 채우고 reply는 null로 남겨라.
@@ -459,12 +462,35 @@ def find_app(query):
                 return app
     return None
 
-def run_applescript(script):
+# 사용자 확인을 기다리는 AppleScript (메시지 전송 등 되돌릴 수 없는 동작)
+_pending_script = None
+
+YES_WORDS = {"응", "응응", "어", "네", "네네", "예", "그래", "그래요", "ㅇㅇ", "좋아", "맞아", "맞아요",
+             "오케이", "ok", "yes", "보내", "보내줘", "보내요", "보내라", "전송", "전송해"}
+NO_WORDS  = ["아니", "말아", "취소", "안 보내", "안보내", "하지 마", "하지마", "잠깐", "다른"]
+
+def is_confirmation(text):
+    t = text.strip().lower()
+    if len(t) > 15 or any(w in t for w in NO_WORDS):
+        return False
+    # "어떻게"처럼 승인어가 포함만 된 경우를 막기 위해 단어 단위로 정확히 비교
+    return any(tok in YES_WORDS for tok in re.findall(r"[가-힣ㄱ-ㅎa-z]+", t))
+
+def needs_confirmation(script):
+    s = script.lower()
+    return '"messages"' in s and re.search(r"\bsend\b", s) is not None
+
+def run_applescript(script, confirmed=False):
+    global _pending_script
     if platform.system() != "Darwin":
         return "AppleScript는 macOS에서만 실행할 수 있어요."
     # 셸 명령 실행은 막는다 (음성 오인식으로 임의 명령이 실행되는 것 방지)
     if "do shell script" in script.lower():
         return "보안상 do shell script는 실행할 수 없어요."
+    if needs_confirmation(script) and not confirmed:
+        _pending_script = script
+        logging.info(f"run_applescript 보류(확인 대기): {script[:80]!r}")
+        return "[확인 필요] 아직 보내지 않았다. 받는 사람과 내용을 말하고 보낼지 물어봐라."
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -566,18 +592,31 @@ def run_agent(user_input):
     t0 = time.time()
     logging.info(f"run_agent: {user_input[:40]!r}")
     set_state("thinking")
+    global _pending_script
 
     recent = conversation_history[-MAX_HISTORY:]
     context_lines = [
         f"{'사용자' if m['role'] == 'user' else '자비스'}: {m['content']}"
         for m in recent
     ]
-    context_lines.append(f"사용자: {user_input}")
 
     final_reply = "죄송해요, 응답 처리 중 오류가 발생했어요."
 
+    # 보류 중인 전송이 있으면 이번 입력이 승인인지 먼저 확인한다
+    pending, _pending_script = _pending_script, None
+    confirmed = False
+    if pending:
+        if is_confirmation(user_input):
+            set_state("working")
+            result = run_applescript(pending, confirmed=True)
+            final_reply = "보냈어요." if not result.startswith("AppleScript 오류") else f"전송에 실패했어요. {result}"
+            confirmed = True
+        else:
+            context_lines.append("[시스템]: 보류 중이던 메시지 전송은 취소됐다.")
+    context_lines.append(f"사용자: {user_input}")
+
     last_result = None
-    for step in range(5):
+    for step in range(0 if confirmed else 5):
         reply, tool_call = call_claude("\n".join(context_lines))
 
         if reply is None and tool_call is None:
@@ -596,7 +635,7 @@ def run_agent(user_input):
         break
     else:
         # 도구 호출만 하다 횟수를 다 쓰면 오류 문구 대신 마지막 도구 결과를 말한다
-        if last_result and len(last_result) < 200:
+        if last_result and len(last_result) < 200 and not last_result.startswith("[확인 필요]"):
             final_reply = last_result
 
     try:

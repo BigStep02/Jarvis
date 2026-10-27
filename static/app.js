@@ -102,11 +102,21 @@ textInput.addEventListener('keydown', (e) => {
 });
 document.getElementById('send-btn').addEventListener('click', sendText);
 
+let lastSent = '';
+let lastSentAt = 0;
+
 function sendText() {
   const input = textInput;
   const text = input.value.trim();
   input.value = '';
   if (!text) { input.focus(); return; }
+  // 안전장치: 직전 전송의 마지막 글자 한 개가 바로 뒤따라오면 IME 잔여 글자로 보고 버린다
+  if (text.length === 1 && lastSent.endsWith(text) && Date.now() - lastSentAt < 1500) {
+    input.focus();
+    return;
+  }
+  lastSent = text;
+  lastSentAt = Date.now();
   ws.send(JSON.stringify({ type: 'text_command', text }));
   input.focus();
 }
