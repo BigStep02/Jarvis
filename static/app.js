@@ -77,16 +77,33 @@ function addChat(role, text) {
 }
 
 // ─── 텍스트 입력 ───
-document.getElementById('text-input').addEventListener('keydown', (e) => {
-  // 한글 조합 중 Enter는 무시 (조합 확정 후 오는 Enter만 처리 → 마지막 글자 중복 전송 방지)
-  if (e.isComposing || e.keyCode === 229) return;
-  if (e.key === 'Enter') sendText();
+// 한글 조합 중에 Enter가 오면 바로 보내지 않고 조합이 끝난 뒤에 보낸다.
+// (조합 중 입력창을 비우면 브라우저가 마지막 글자를 다시 넣어서 한 글자가 중복 전송됨)
+const textInput = document.getElementById('text-input');
+let composing = false;
+let sendAfterCompose = false;
+
+textInput.addEventListener('compositionstart', () => { composing = true; });
+textInput.addEventListener('compositionend', () => {
+  composing = false;
+  if (sendAfterCompose) {
+    sendAfterCompose = false;
+    setTimeout(sendText, 0);
+  }
+});
+textInput.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  // Chrome: 조합이 아직 안 끝난 상태로 Enter가 옴 → compositionend에서 전송
+  if (composing || e.isComposing) { sendAfterCompose = true; return; }
+  // Safari: 조합이 먼저 끝나고 keyCode 229로 Enter가 옴 → 확정된 값으로 바로 전송
+  if (e.keyCode === 229) { setTimeout(sendText, 0); return; }
+  e.preventDefault();
+  sendText();
 });
 document.getElementById('send-btn').addEventListener('click', sendText);
 
 function sendText() {
-  const input = document.getElementById('text-input');
-  input.blur();                   // IME 조합 중인 글자 즉시 확정
+  const input = textInput;
   const text = input.value.trim();
   input.value = '';
   if (!text) { input.focus(); return; }
